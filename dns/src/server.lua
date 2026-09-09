@@ -11,6 +11,13 @@ local DEFAULTS = {
     sessionTTL = 1800,
     challengeTTL = 180,
     logQueries = true,
+    AuthenticationRequired = true, -- Public lookups only when explicitly disabled.
+    readOnly = false, -- Blocks record edits/reloads, even for admins.
+    maxSessions = 64,
+    maxSessionsPerComputer = 8,
+    maxPendingChallenges = 64,
+    loginCooldown = 2,
+    publicQueryLimit = 20, -- Global unsigned requests/second; excess is dropped.
 }
 
 local HELP = [[Authenticated Rednet DNS
@@ -31,6 +38,22 @@ Options:
       --challenge-ttl <s> Login challenge: 1..3600 seconds (default: 180)
       --log-queries      Enable request logging (default)
       --no-log-queries   Disable request logging
+      --authentication-required [true|false]
+                         Require login for lookups (default: true)
+      --AuthenticationRequired [true|false]
+                         Alias for --authentication-required
+      --no-authentication-required
+                         Allow unsigned public lookups, NOT record edits
+      --read-only        Block record edits/reloads, including admin edits
+      --no-read-only     Allow authenticated admins to edit (default)
+      --max-sessions <n> Total sessions: 1..64 (default: 64)
+      --max-sessions-per-computer <n>
+                         Sessions per computer: 1..8 (default: 8)
+      --max-pending-challenges <n>
+                         Pending logins: 1..64 (default: 64)
+      --login-cooldown <s> New login throttle: 0..60 seconds (default: 2)
+      --public-query-limit <n>
+                         Unsigned requests/second: 1..1000 (default: 20)
       --check            Validate databases without changing files
       --user <name> <role>
                          Create/reset a user locally; stop server first
@@ -43,7 +66,13 @@ Relative paths resolve from the shell's current directory.
 Config changes require a restart. Passwords are prompted, not stored in config.
 
 Config fields (all optional; unknown fields are rejected):
-  directory, modem, sessionTTL, challengeTTL, logQueries
+  directory, modem, sessionTTL, challengeTTL, logQueries,
+  AuthenticationRequired, readOnly, maxSessions, maxSessionsPerComputer,
+  maxPendingChallenges, loginCooldown, publicQueryLimit
+Public replies are unsigned/spoofable. Clients must explicitly opt in with
+  dns.setAuthenticationRequired(false)
+An initial admin is still required, even with public lookups enabled.
+Record editing ALWAYS requires an authenticated admin; no flag bypasses this.
 Set modem = false to open all modems, or modem = "back" to select one.
 TTLs are seconds; allow enough challenge time for slow password derivation.
 
@@ -69,8 +98,17 @@ local function nonempty(value)
     return type(value) == "string" and value:find("%S") ~= nil
 end
 
-local function validTTL(value)
-    return type(value) == "number" and value >= 1 and value <= 3600 and value % 1 == 0
+local numberRanges = {
+    sessionTTL = { 1, 3600 },
+    challengeTTL = { 1, 3600 },
+    maxSessions = { 1, 64 },
+    maxSessionsPerComputer = { 1, 8 },
+    maxPendingChallenges = { 1, 64 },
+    loginCooldown = { 0, 60 },
+    publicQueryLimit = { 1, 1000 },
+}
+local function boolean(value)
+    return type(value) == "boolean"
 end
 
 local validators = {
@@ -78,19 +116,24 @@ local validators = {
     modem = function(value)
         return value == false or nonempty(value)
     end,
-    sessionTTL = validTTL,
-    challengeTTL = validTTL,
-    logQueries = function(value)
-        return type(value) == "boolean"
-    end,
+    logQueries = boolean,
+    AuthenticationRequired = boolean,
+    readOnly = boolean,
 }
 local settingHints = {
     directory = "a nonempty path",
     modem = "false (all modems) or a nonempty modem name",
-    sessionTTL = "an integer from 1 through 3600",
-    challengeTTL = "an integer from 1 through 3600",
     logQueries = "true or false",
+    AuthenticationRequired = "true or false",
+    readOnly = "true or false",
 }
+for key, range in pairs(numberRanges) do
+    local lo, hi = range[1], range[2]
+    validators[key] = function(value)
+        return type(value) == "number" and value >= lo and value <= hi and value % 1 == 0
+    end
+    settingHints[key] = "an integer from " .. lo .. " through " .. hi
+end
 
 local function validateSettings(settings, source)
     if type(settings) ~= "table" then
@@ -110,14 +153,24 @@ end
 local function parseOptions(args)
     local options = { mode = "serve", configPath = DEFAULT_CONFIG_PATH, overrides = {} }
     local positional, seen = {}, {}
-    local aliases =
-        { ["-h"] = "--help", ["-c"] = "--config", ["-d"] = "--directory", ["-m"] = "--modem" }
+    local aliases = {
+        ["-h"] = "--help",
+        ["-c"] = "--config",
+        ["-d"] = "--directory",
+        ["-m"] = "--modem",
+        ["--AuthenticationRequired"] = "--authentication-required",
+    }
     local valueOptions = {
         ["--config"] = "configPath",
         ["--directory"] = "directory",
         ["--modem"] = "modem",
         ["--session-ttl"] = "sessionTTL",
         ["--challenge-ttl"] = "challengeTTL",
+        ["--max-sessions"] = "maxSessions",
+        ["--max-sessions-per-computer"] = "maxSessionsPerComputer",
+        ["--max-pending-challenges"] = "maxPendingChallenges",
+        ["--login-cooldown"] = "loginCooldown",
+        ["--public-query-limit"] = "publicQueryLimit",
     }
 
     local function claim(key)
@@ -165,14 +218,24 @@ local function parseOptions(args)
                     claim(key)
                     options.configPath, options.explicitConfig = value, true
                 else
-                    if key == "sessionTTL" or key == "challengeTTL" then
+                    if numberRanges[key] then
                         value = tonumber(value)
-                        if not validTTL(value) then
-                            optionError(flag .. " must be an integer from 1 through 3600")
+                        if not validators[key](value) then
+                            optionError(flag .. " must be " .. settingHints[key])
                         end
                     end
                     override(key, value)
                 end
+            elseif flag == "--authentication-required" then
+                local value = inline
+                if value == nil and (args[i + 1] == "true" or args[i + 1] == "false") then
+                    i = i + 1
+                    value = args[i]
+                end
+                if value ~= nil and value ~= "true" and value ~= "false" then
+                    optionError(flag .. " expects true or false")
+                end
+                override("AuthenticationRequired", value ~= "false")
             else
                 if inline ~= nil then
                     optionError(flag .. " does not accept an inline value")
@@ -185,6 +248,12 @@ local function parseOptions(args)
                     override("logQueries", true)
                 elseif flag == "--no-log-queries" then
                     override("logQueries", false)
+                elseif flag == "--no-authentication-required" then
+                    override("AuthenticationRequired", false)
+                elseif flag == "--read-only" then
+                    override("readOnly", true)
+                elseif flag == "--no-read-only" then
+                    override("readOnly", false)
                 elseif flag == "--check" then
                     setMode("check")
                 elseif flag == "--init-config" then
@@ -517,6 +586,13 @@ assert(rednet.isOpen(), "Attach a modem, then restart")
 print("Authenticated Rednet DNS | server ID " .. os.getComputerID())
 print("Records cached in RAM: " .. #recordsDB.records .. " | revision " .. recordsDB.revision)
 print("Files: " .. authPath .. " and " .. recordsPath)
+print("Lookup authentication required: " .. tostring(config.AuthenticationRequired))
+print(
+    "Record edits: " .. (config.readOnly and "disabled (read-only)" or "authenticated admins only")
+)
+if not config.AuthenticationRequired then
+    print("WARNING: Public lookup replies are unsigned and can be spoofed.")
+end
 print("Ctrl+T stops. Use --user locally to create users or reset passwords.")
 
 local sessions, pending = {}, {}
@@ -600,6 +676,9 @@ local function process(s, op, a)
     if auth.users[s.username].role ~= "admin" then
         return nil, "Administrator role required", "FORBIDDEN"
     end
+    if config.readOnly and (op == "setRecords" or op == "reloadRecords") then
+        return nil, "Record changes are disabled by read-only mode", "READ_ONLY"
+    end
     if op == "listRecords" then
         if not I.integer(a.offset, 0, 512) or not I.integer(a.limit, 1, 8) then
             return nil, "Invalid pagination", "BAD_ARGUMENT"
@@ -616,6 +695,15 @@ local function process(s, op, a)
             nextOffset = nextOffset < #recordsDB.records and nextOffset or false,
         }
     elseif op == "setRecords" then
+        -- Optional optimistic concurrency guard used by the example editor.
+        if a.expectedRevision ~= nil then
+            if not I.integer(a.expectedRevision, 1, 4294967295) then
+                return nil, "Invalid expected revision", "BAD_ARGUMENT"
+            end
+            if a.expectedRevision ~= recordsDB.revision then
+                return nil, "Records changed; reload before saving", "CONFLICT"
+            end
+        end
         local q, err, code = I.question(a.type, a.name)
         if not q then
             return nil, err, code
@@ -693,12 +781,68 @@ end
 local function send(sender, message)
     rednet.send(sender, message, I.protocol)
 end
+-- Public traffic has a separate, lookup-only path. It NEVER calls process().
+-- Global rate limiting bounds work without allocating per-sender state.
+local publicWindow, publicCount = 0, 0
+local function handlePublic(sender, message)
+    if type(message.id) ~= "string" or #message.id ~= 64 or not message.id:match("^[0-9a-f]+$") then
+        return
+    end
+    local now = os.clock()
+    if now - publicWindow >= 1 then
+        publicWindow, publicCount = now, 0
+    end
+    if publicCount >= config.publicQueryLimit then
+        return
+    end
+    publicCount = publicCount + 1
+
+    local response = { kind = "public_response", id = message.id, ok = false }
+    local records, err, code
+    if message.op ~= "lookup" then
+        err, code = "Administrator authentication required for this operation", "FORBIDDEN"
+    elseif config.AuthenticationRequired then
+        err, code = "This server requires authentication for lookups", "AUTH_REQUIRED"
+    elseif type(message.args) ~= "table" then
+        err, code = "Expected lookup arguments", "BAD_ARGUMENT"
+    else
+        local q
+        q, err, code = I.question(message.args.type, message.args.name)
+        if q then
+            records, err, code = I.resolve(index, q.type, q.name)
+        end
+    end
+    if records then
+        response.ok, response.data = true, records
+    else
+        response.error, response.code = err, code
+    end
+    -- Encode public replies too: bounded data decoding on the client, no MAC.
+    local ok, payload = pcall(I.encode, response)
+    if not ok or #payload > 65536 then
+        response = {
+            kind = "public_response",
+            id = message.id,
+            ok = false,
+            error = "Response exceeds the packet size limit",
+            code = "RESPONSE_TOO_LARGE",
+        }
+        payload = I.encode(response)
+    end
+    send(sender, { publicPayload = payload })
+    if config.logQueries then
+        print("public #" .. sender .. " " .. (response.code or "OK"))
+    end
+end
+
 local function handle(sender, message)
     cleanup()
     if not I.integer(sender, 0, 2147483647) or type(message) ~= "table" then
         return
     end
-    if message.kind == "hello" then
+    if message.kind == "public_request" then
+        handlePublic(sender, message)
+    elseif message.kind == "hello" then
         if
             not I.username(message.username)
             or type(message.client) ~= "string"
@@ -715,10 +859,10 @@ local function handle(sender, message)
             send(sender, previous.challenge)
             return
         end
-        if previous and os.clock() - previous.created < 2 then
+        if previous and os.clock() - previous.created < config.loginCooldown then
             return
         end
-        if not previous and count(pending) >= 64 then
+        if not previous and count(pending) >= config.maxPendingChallenges then
             return
         end
         local user = auth.users[message.username]
@@ -769,7 +913,7 @@ local function handle(sender, message)
             p.failed = true
             return
         end
-        if count(sessions) >= 64 then
+        if count(sessions) >= config.maxSessions then
             local oldest, expires = nil, math.huge
             for oldId, s in pairs(sessions) do
                 if s.revoked and s.expires < expires then
@@ -788,7 +932,7 @@ local function handle(sender, message)
                 sameSender = sameSender + 1
             end
         end
-        if sameSender >= 8 then
+        if sameSender >= config.maxSessionsPerComputer then
             return
         end
         local c2s, s2c = I.sessionKeys(p.key, transcript)

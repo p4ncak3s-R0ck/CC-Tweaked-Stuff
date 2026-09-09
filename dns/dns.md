@@ -4,7 +4,7 @@
 
 # Authenticated DNS over Rednet
 
-Three source files, two persistent binary objects, and live record administration for CC:Tweaked.
+Two runtime Lua files, an optional example record editor, and live record administration for CC:Tweaked.
 
 ```lua
 local dns = require("dns")
@@ -19,8 +19,10 @@ This is a custom Rednet name service. Its addresses are computer IDs, and its pa
 
 | File | Location | Contents / purpose |
 |---|---|---|
-| `dnsServer.lua` | Server computer | Server program, persistence, and permission enforcement |
+| `dnsServer.lua` (from `src/server.lua`) | Server computer | Server program, persistence, and permission enforcement |
 | `dns.lua` | Server and every client | Public client library plus shared binary/crypto implementation |
+| `examples/dnsRecords.lua` | Optional admin computer | Interactive record editor; install beside `dns.lua` |
+| `/dns-server.cfg` | Optional server config | Generated with `--init-config`; settings only, no credentials |
 | `dns.md` | Reference | This documentation |
 | `auth.bin` | Created on the server | Users, password-derived verifiers, roles, and server secret |
 | `records.bin` | Created on the server | Record objects and their revision number |
@@ -67,6 +69,76 @@ shell.run("dnsServer.lua", "back")
 
 Only run one server process against a given database directory. Stop it with Ctrl+T before using the offline user-management command.
 
+## Flags and configuration
+
+In this repository the server is `src/server.lua`; save it as `dnsServer.lua` on the computer to match these commands. Run `dnsServer --help` for all flags. Legacy positional commands still work.
+
+```text
+dnsServer --init-config --modem back --directory /dns-data
+dnsServer
+dnsServer --AuthenticationRequired=false
+dnsServer --read-only --max-sessions 16
+```
+
+`--init-config` writes `/dns-server.cfg` and exits without creating databases or opening modems. It never overwrites an existing file. Use `--config /custom.cfg` (`-c`) to select another config; explicit files must exist except when generating them. Missing default config uses built-in defaults. Precedence is **defaults < config < flags**. Relative paths resolve from the shell's current directory. Restart to apply changes.
+
+The config is a data-only serialized table, not an executable Lua program:
+
+```lua
+{
+    directory = "/dns-data",
+    modem = "back",
+    AuthenticationRequired = true,
+    readOnly = false,
+    logQueries = true,
+    sessionTTL = 1800,
+    challengeTTL = 180,
+    maxSessions = 64,
+    maxSessionsPerComputer = 8,
+    maxPendingChallenges = 64,
+    loginCooldown = 2,
+    publicQueryLimit = 20,
+}
+```
+
+All fields are optional; unknown fields and invalid values are rejected. `modem = false` opens all attached modems. Passwords stay out of this file.
+
+| Flag | Config field | Default / range |
+|---|---|---|
+| `--directory`, `-d` | `directory` | `/` |
+| `--modem`, `-m` / `--all-modems` | `modem` | `false` (all modems) |
+| `--authentication-required [true\|false]` (alias `--AuthenticationRequired`) / `--no-authentication-required` | `AuthenticationRequired` | `true` |
+| `--read-only` / `--no-read-only` | `readOnly` | `false` |
+| `--log-queries` / `--no-log-queries` | `logQueries` | `true` |
+| `--session-ttl` | `sessionTTL` | 1800 seconds; integer 1..3600 |
+| `--challenge-ttl` | `challengeTTL` | 180 seconds; integer 1..3600 |
+| `--max-sessions` | `maxSessions` | 64; integer 1..64 |
+| `--max-sessions-per-computer` | `maxSessionsPerComputer` | 8; integer 1..8 |
+| `--max-pending-challenges` | `maxPendingChallenges` | 64; integer 1..64 |
+| `--login-cooldown` | `loginCooldown` | 2 seconds; integer 0..60 |
+| `--public-query-limit` | `publicQueryLimit` | 20 requests/second; integer 1..1000 |
+
+Value flags accept `--flag=value` or `--flag value`. Repeated/conflicting flags are rejected. Read-only mode blocks record writes, deletes, and reloads even for admins; it does not block account management. Session limits apply together, so the total-session limit can be lower than the per-computer limit. The login cooldown applies to replacement challenges while a previous challenge is retained; exact retries reuse that challenge.
+
+### Public lookups (optional)
+
+`AuthenticationRequired = false` allows **lookups only** without a login. It never permits anonymous edits, listing all records, user management, or admin RPCs. Initial setup still provisions an admin. Readers still cannot edit records.
+
+Clients must explicitly opt into unsigned replies:
+
+```lua
+local dns = require("dns")
+dns.setServer(42)
+dns.setAuthenticationRequired(false) -- Explicitly accept unsigned public lookups.
+local records, err, code = dns.lookupRecord("ID", "storage.base")
+assert(records, err)
+print(records[1].value)
+```
+
+The client defaults to requiring authentication. A valid authenticated session always uses signed queries, even after opting into public lookups. There is **no fallback after a failed signed request**. With public opt-in, a lookup made without a valid session (including after logout or expiry) is public. Public replies are not cached, and cannot populate the authenticated cache. An auth-required server returns `AUTH_REQUIRED` for public lookups.
+
+**Public replies are unsigned and spoofable.** A matching computer ID and request nonce do not prove server identity. Use authenticated sessions when lookup integrity matters. Public requests use a separate lookup-only handler, bounded replies, and a global per-second request limit. Excess requests are dropped and may cause client timeouts; this is not comprehensive denial-of-service protection.
+
 ## Create users and reset passwords
 
 User provisioning happens **locally on the server**, where new password material never needs to cross Rednet:
@@ -89,7 +161,7 @@ If no auth database exists, the first user must be an admin. The last admin cann
 | `reader` | Authenticate and query records |
 | `admin` | Query records, edit/reload/list records, list users, change roles, and delete users |
 
-Both roles require authentication. The server checks permissions on every operation; changing client-side Lua code cannot grant admin privileges.
+Authenticated users have these roles. Public lookups can optionally bypass login, but **all record edits require an authenticated admin**, enforced by the server on every operation. Changing client-side Lua code or disabling `AuthenticationRequired` cannot grant admin privileges.
 
 ## Authenticate and query
 
@@ -154,6 +226,25 @@ assert(dns.admin.deleteRecords("TXT", "storage.base"))
 ```
 
 An empty `setRecords` list has the same effect. Repeating either operation is safe in terms of record contents, though each acknowledged edit increments the revision.
+
+### Example record editor
+
+Copy `examples/dnsRecords.lua` and the updated `src/dns.lua` onto an admin computer. Run:
+
+```text
+dnsRecords --server 42 --modem back --username joshua
+```
+
+The app prompts for a masked password and refuses reader accounts. Choose **list** to browse records or **edit/add set** to select a name and type. Within a set you can add, edit, or remove individual entries, then confirm **save**. Cancelling makes no changes. Removing all entries and saving deletes that name/type set. All five record types are supported, including SRV fields and empty TXT values.
+
+The editor preserves other entries in a set and uses the loaded database revision when saving. If another admin edits in the meantime, the server returns `CONFLICT` rather than overwriting newer changes. Reopen the set and reapply your edits. A timeout can mean a save succeeded: log in and inspect the database before retrying. Read-only mode returns `READ_ONLY`. Both client and server must be updated for revision-guarded saves.
+
+Programmatic callers can also supply a revision:
+
+```lua
+local page = assert(dns.admin.listRecords())
+assert(dns.admin.setRecord("ID", "storage.base", 17, 300, page.revision))
+```
 
 ### List records
 
@@ -228,7 +319,7 @@ rednet.send(addresses[1].value, "status", service.protocol)
 
 The server's RAM index is authoritative and remains loaded until an edit or reload. Record TTLs do not expire server records.
 
-Clients have a separate RAM cache:
+Authenticated clients have a separate RAM cache (public answers are never cached):
 
 - Positive answers are cached under normalized name and record type for the shortest TTL in the answer.
 - Up to 256 answers are retained. Expired entries are removed, and the oldest entry is evicted when full.
@@ -247,6 +338,8 @@ A still-valid cached answer does not contact the server. Consequently, a user wh
 | `dns.new()` | Independent client object, with its own server, login session, and cache |
 | `dns.setServer(id)` | Selects the server; forgets local login and cache |
 | `dns.getServer()` | Server computer ID or `nil` |
+| `dns.setAuthenticationRequired(boolean)` | Default `true`; `false` opts into unsigned, uncached lookups when no valid session exists. Never authorizes admin calls. |
+| `dns.getAuthenticationRequired()` | This client's policy, not a discovery query for the server's policy |
 | `dns.open([modemName])` | Opens a named modem or all modems; returns `true` or an error |
 | `dns.authenticate(username, password)` | Returns `true, role`, or `nil, message, code` |
 | `dns.isAuthenticated()` | Whether this client has a locally unexpired session |
@@ -256,9 +349,9 @@ A still-valid cached answer does not contact the server. Consequently, a user wh
 | `dns.clearCache()` | Removes this client's cached answers |
 | `dns.setTimeout(seconds)` | Per-attempt timeout, default 3; allowed range greater than 0 through 60 |
 | `dns.setRetries(count)` | Additional attempts, default 1; allowed integers 0 through 5 |
-| `dns.admin.setRecord(type, name, value, [ttl])` | Replaces a name/type set with one record |
-| `dns.admin.setRecords(type, name, records)` | Replaces a set with a list of `{ value, ttl }` entries |
-| `dns.admin.deleteRecords(type, name)` | Removes a complete name/type set |
+| `dns.admin.setRecord(type, name, value, [ttl], [expectedRevision])` | Replaces a name/type set with one record |
+| `dns.admin.setRecords(type, name, records, [expectedRevision])` | Replaces a set with a list of `{ value, ttl }` entries |
+| `dns.admin.deleteRecords(type, name, [expectedRevision])` | Removes a complete name/type set |
 | `dns.admin.listRecords([offset], [limit])` | Page object; defaults 0 and 8, with a maximum limit of 8 |
 | `dns.admin.reloadRecords()` | Reloads disk records into RAM; returns `{ revision, count }` |
 | `dns.admin.listUsers()` | List of `{ username, role }`; no credential fields |
@@ -267,7 +360,7 @@ A still-valid cached answer does not contact the server. Consequently, a user wh
 
 Admin methods return `nil, message, code` on failure. Record mutations and user mutations return a revision object on success. A user's role is enforced by the server's current auth state, not the cached result of `getRole()`.
 
-`setServer`, `setTimeout`, and `setRetries` raise Lua errors for invalid arguments. `open` also raises for an explicitly invalid modem name. Each client object permits only one in-flight call. A second call on that object returns `BUSY`; use another `dns.new()` instance for concurrency.
+`setServer`, `setTimeout`, `setRetries`, and `setAuthenticationRequired` raise Lua errors for invalid arguments. `open` also raises for an explicitly invalid modem name. Each client object permits only one in-flight call. A second call on that object returns `BUSY`; use another `dns.new()` instance for concurrency.
 
 There is intentionally no remote `createUser` or `setPassword` method in this version. Provision or reset passwords with the local `--user` command. Live role changes and user deletion are available remotely to admins.
 
@@ -277,17 +370,17 @@ Passwords are not sent over Rednet. Login uses PBKDF2-HMAC-SHA-256 (10,000 itera
 
 Directional session keys sign every request and response with HMAC-SHA-256. Request sequence numbers reject old replays. The server caches the most recent request and reply per session: resending exactly that request returns its original reply without performing a mutation twice.
 
-Sessions last 30 minutes by default. They are bound to the connecting computer ID and live only in RAM. `SESSION_TTL` in `dnsServer.lua` can be set to an integer from 1 through 3600 seconds. Role changes and deletion revoke the affected user's sessions. Logout revokes its own session.
+Sessions last 30 minutes by default. They are bound to the connecting computer ID and live only in RAM. `sessionTTL` in the config (or `--session-ttl`) accepts an integer from 1 through 3600 seconds. Role changes and deletion revoke the affected user's sessions. Logout revokes its own session.
 
 The login challenge lasts three minutes to allow password derivation on slower computers. Password derivation yields periodically and may take several seconds. Defaults allow a three-second wait plus one retry for each network stage; this does not include the local password-derivation time.
 
 After all RPC attempts time out, the client discards its session because the server may have processed the operation. Authenticate again, then inspect records before deciding whether to repeat an uncertain edit. Unknown or expired sessions after a server restart result in a timeout; an unsigned error cannot make the client accept a forged response.
 
-Limits are 64 simultaneous sessions, at most eight active sessions per computer ID, and 64 pending login challenges. A short per-ID login throttle limits accidental rapid attempts. Computer IDs can be spoofed, so this is not comprehensive denial-of-service protection.
+Default limits are 64 simultaneous sessions, at most eight active sessions per computer ID, and 64 pending login challenges. Config/flags can lower these limits. A short per-ID login throttle limits accidental rapid attempts. Computer IDs can be spoofed, so this is not comprehensive denial-of-service protection.
 
 ### Security boundaries
 
-- **Messages are signed, not encrypted.** Authentication controls which requests the server accepts. A listener can still observe record contents and usernames on the wire.
+- **Authenticated messages are signed, not encrypted.** Public lookups, when explicitly enabled, have no signatures or server-identity guarantees. Authentication controls which requests the server accepts. A listener can still observe record contents and usernames on the wire.
 - `auth.bin` does not contain plaintext passwords, but its verifier keys are credential-equivalent secrets for this protocol. Protect that file, its backups, and the server computer. Binary encoding does not hide secrets from someone who can read the file.
 - Captured login exchanges allow offline password guesses. Use long random passwords. The pure-Lua derivation cost is chosen for Minecraft practicality; this is a custom application protocol, not an audited production authentication system.
 - File checksums detect accidental corruption; they are not signatures and do not stop a local editor from changing files.
@@ -338,6 +431,8 @@ Common error codes:
 | `BUSY` | Another operation is in progress on this client object |
 | `BAD_TYPE` / `BAD_NAME` / `BAD_ARGUMENT` | Invalid API input |
 | `BAD_RECORDS` | Proposed records violate database rules |
+| `CONFLICT` | Database revision changed; reload before saving |
+| `READ_ONLY` | Server has disabled record edits and reloads |
 | `NXDOMAIN` / `NODATA` | Missing name / no records of requested type |
 | `CNAME_LOOP` | Alias traversal limit or loop |
 | `NO_USER` / `LAST_ADMIN` | Unknown account / operation would remove the last admin |

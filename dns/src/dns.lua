@@ -497,6 +497,7 @@ end
 local function newClient()
     local dns = { admin = {} }
     local server, timeout, retries = nil, 3, 1
+    local authenticationRequired = true -- Never silently downgrade to unsigned replies.
     local session, cache, busy = nil, {}, false
     local function reset()
         session = nil
@@ -510,6 +511,15 @@ local function newClient()
     end
     function dns.getServer()
         return server
+    end
+    function dns.setAuthenticationRequired(required)
+        assert(not busy, "DNS client is busy")
+        assert(type(required) == "boolean", "AuthenticationRequired must be true or false")
+        authenticationRequired = required
+        cache = {}
+    end
+    function dns.getAuthenticationRequired()
+        return authenticationRequired
     end
     function dns.setTimeout(n)
         assert(type(n) == "number" and n > 0 and n <= 60, "Timeout must be >0..60")
@@ -732,7 +742,66 @@ local function newClient()
             return result, err, code
         end)
     end
-    -- Lookups and TTL-aware local caching.
+    local function validateAnswer(records, kind)
+        local valid, count = I.array(records, 64)
+        if not valid or count == 0 then
+            return nil, "Invalid answer", "BAD_RESPONSE"
+        end
+        local clean, ttl = {}, 604800
+        for n, record in ipairs(records) do
+            local ok, normalized = pcall(I.record, record)
+            if not ok or normalized.type ~= kind then
+                return nil, "Invalid answer record", "BAD_RESPONSE"
+            end
+            clean[n] = normalized
+            ttl = math.min(ttl, normalized.ttl)
+        end
+        return clean, ttl
+    end
+
+    -- Explicitly opted-in public lookups are unsigned and deliberately uncached.
+    -- A nonce correlates replies, but cannot authenticate a spoofable Rednet ID.
+    local function publicLookup(question)
+        local request = { kind = "public_request", id = I.nonce(), op = "lookup", args = question }
+        local response, err, code = exchange(request, function(message)
+            if
+                type(message) ~= "table"
+                or type(message.publicPayload) ~= "string"
+                or #message.publicPayload > 65536
+            then
+                return
+            end
+            local ok, body = pcall(I.decode, message.publicPayload)
+            if
+                not ok
+                or type(body) ~= "table"
+                or body.kind ~= "public_response"
+                or body.id ~= request.id
+                or type(body.ok) ~= "boolean"
+            then
+                return
+            end
+            if body.ok and type(body.data) == "table" then
+                return body
+            end
+            if not body.ok and type(body.error) == "string" and type(body.code) == "string" then
+                return body
+            end
+        end)
+        if not response then
+            return nil, err, code
+        end
+        if not response.ok then
+            return nil, response.error, response.code
+        end
+        local clean, ttlOrError, validationCode = validateAnswer(response.data, question.type)
+        if not clean then
+            return nil, ttlOrError, validationCode
+        end
+        return clean
+    end
+
+    -- Lookups and TTL-aware local caching (authenticated answers only).
     function dns.lookupRecord(kind, name)
         return locked(function()
             local q, err, code = I.question(kind, name)
@@ -742,6 +811,9 @@ local function newClient()
             -- Check session before cache: logging out never permits cached lookups.
             if not dns.isAuthenticated() then
                 reset()
+                if not authenticationRequired then
+                    return publicLookup(q)
+                end
                 return nil, "Call dns.authenticate first", "AUTH_REQUIRED"
             end
             local key = q.type .. ":" .. q.name
@@ -760,18 +832,9 @@ local function newClient()
             if not records then
                 return nil, err, code
             end
-            local valid, count = I.array(records, 64)
-            if not valid or count == 0 then
-                return nil, "Invalid answer", "BAD_RESPONSE"
-            end
-            local clean, ttl = {}, 604800
-            for n, r in ipairs(records) do
-                local ok, c = pcall(I.record, r)
-                if not ok or c.type ~= q.type then
-                    return nil, "Invalid answer record", "BAD_RESPONSE"
-                end
-                clean[n] = c
-                ttl = math.min(ttl, c.ttl)
+            local clean, ttl, validationCode = validateAnswer(records, q.type)
+            if not clean then
+                return nil, ttl, validationCode
             end
             if ttl > 0 then
                 local total, oldest, oldTime = 0, nil, math.huge
@@ -803,7 +866,10 @@ local function newClient()
             return value, err, code
         end)
     end
-    function dns.admin.setRecords(kind, name, records)
+    function dns.admin.setRecords(kind, name, records, expectedRevision)
+        if expectedRevision ~= nil and not I.integer(expectedRevision, 1, 4294967295) then
+            return nil, "Expected revision must be a positive uint32", "BAD_ARGUMENT"
+        end
         local q, err, code = I.question(kind, name)
         if not q then
             return nil, err, code
@@ -824,13 +890,14 @@ local function newClient()
             clean[n] = c
         end
         q.records = clean
+        q.expectedRevision = expectedRevision
         return admin("setRecords", q)
     end
-    function dns.admin.setRecord(kind, name, value, ttl)
-        return dns.admin.setRecords(kind, name, { { value = value, ttl = ttl } })
+    function dns.admin.setRecord(kind, name, value, ttl, expectedRevision)
+        return dns.admin.setRecords(kind, name, { { value = value, ttl = ttl } }, expectedRevision)
     end
-    function dns.admin.deleteRecords(kind, name)
-        return dns.admin.setRecords(kind, name, {})
+    function dns.admin.deleteRecords(kind, name, expectedRevision)
+        return dns.admin.setRecords(kind, name, {}, expectedRevision)
     end
     function dns.admin.listRecords(offset, limit)
         offset, limit = offset or 0, limit or 8
