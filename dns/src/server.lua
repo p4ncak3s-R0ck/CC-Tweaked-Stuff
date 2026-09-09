@@ -295,7 +295,14 @@ local function parseOptions(args)
 end
 
 local function resolvePath(path)
-    return shell and shell.resolve and shell.resolve(path) or path
+    if shell and shell.resolve then
+        -- CC:Tweaked returns root-relative paths without a leading slash, and
+        -- represents root as "". Persist explicit absolute paths so configs
+        -- round-trip and keep pointing at the same data from any working dir.
+        local resolved = shell.resolve(path)
+        return resolved:sub(1, 1) == "/" and resolved or "/" .. resolved
+    end
+    return path
 end
 
 local function loadSettings(options)
@@ -326,6 +333,11 @@ local function loadSettings(options)
         local ok, loaded = pcall(textutils.unserialize, contents)
         if not ok or type(loaded) ~= "table" then
             optionError("Invalid config table: " .. path)
+        end
+        -- Older --init-config versions serialized CC's root as an empty path.
+        -- Migrate it in memory without rewriting the user's config file.
+        if loaded.directory == "" then
+            loaded.directory = "/"
         end
         validateSettings(loaded, path)
         for key, value in pairs(loaded) do
