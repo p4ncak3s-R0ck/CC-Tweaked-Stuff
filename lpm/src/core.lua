@@ -3,6 +3,10 @@ local log=require("log")
 local M={version="0.2.0",log=log}
 local builtins=require("official-repositories")
 local OFFICIAL=builtins.official
+local LEGACY={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}
+local function legacyRepository(r)
+    return (r.github==LEGACY.github or r.github==builtins.selfUpdate.github) and (r.ref or "main")=="main" and (not r.path or r.path=="")
+end
 local MAX_FILE, MAX_TOTAL = 1048576, 8388608
 local function sorted(t) local a={}; for k in pairs(t) do a[#a+1]=k end; table.sort(a); return a end
 local function name(n)
@@ -59,7 +63,7 @@ end
 -- A standalone package is valid Lua with a non-executing metadata comment.
 local function singleManifest(bytes,n)
     local header=bytes:match("^%s*%-%-%[=%[lpm%s*\n(.-)\n%]=%]")
-    assert(header,"Single-file package requires a --[=[lpm metadata header: "..n)
+    if not header then return manifest(data.parse(bytes),n) end
     local m=data.parse(header)
     assert(m.files==nil,"Single-file metadata must not declare files")
     assert(m.hashes==nil,"Single-file metadata cannot hash its own containing file")
@@ -106,10 +110,10 @@ local function base(r,n) return (r.path and r.path~="" and r.path.."/" or "")..n
 local function validateProject(p)
     assert(p.manifestVersion==1,"Unsupported project schema"); name(p.name); semver.parse(p.version)
     deps(p.dependencies or {}); p.dependencies=p.dependencies or {}
-    p.repositories=p.repositories or {default=clone(OFFICIAL)}
+    p.repositories=p.repositories or {default=clone(LEGACY)}
     for k,r in pairs(p.repositories) do
         name(k); repo(r)
-        if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL),"official is a reserved repository; use another name") end
+        if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL) or legacyRepository(r),"official is a reserved repository; use another name") end
     end
     assert(p.officialRepository==nil or type(p.officialRepository)=="boolean","officialRepository must be boolean")
     local function exists(k) name(k); if k=="official" then return p.officialRepository~=false end; return p.repositories[k] end
@@ -136,6 +140,7 @@ local function repositorySources(p,n)
         if not k or seen[k] or (k=="official" and p.officialRepository==false) then return end
         local r=p.repositories[k] or (k=="official" and OFFICIAL)
         assert(r,"Unknown repository "..tostring(k))
+        if k=="official" or legacyRepository(r) then r=OFFICIAL end
         seen[k]=true; sources[#sources+1]={name=k,repository=r}
     end
     if p.packageRepositories and p.packageRepositories[n] then

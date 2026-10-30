@@ -5,7 +5,7 @@ return {
     type = "application",
     entry = "main.lua",
     repositories = {
-        default = { github = "p4ncak3s-R0ck/CC-Tweaked-Stuff", ref = "main" },
+        default = { github = "p4ncak3s-R0ck/LPM-Packages", ref = "main" },
     },
     dependencies = { dns = "^2.0.0" },
 }
