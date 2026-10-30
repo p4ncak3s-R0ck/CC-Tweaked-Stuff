@@ -15,13 +15,15 @@ os.chdir(root)
 runtime = LuaRuntime(unpack_returned_tuples=True)
 requests = []
 
-def fetch(url):
+def fetch(url, accept=None):
     requests.append(url)
     print('HTTP', url, flush=True)
     try:
-        with urlopen(Request(url, headers={'User-Agent': 'LPM-live-repository-check'}), timeout=30) as response:
+        headers={'User-Agent': 'LPM-live-repository-check'}
+        if accept: headers['Accept']=accept
+        with urlopen(Request(url, headers=headers), timeout=30) as response:
             body = response.read(1048577).decode('utf-8')
-            if url.startswith('https://api.github.com/'):
+            if url.startswith('https://api.github.com/') and body.lstrip().startswith('{'):
                 body = json.dumps(json.loads(body), separators=(',', ':'))
             return body, response.status, None
     except HTTPError as error:
@@ -36,7 +38,7 @@ runtime.globals().LIVE_BUNDLE = (root/'lpm.lua').read_text()
 harness = (root/'tests/test.lua').read_text().split('local tests=0',1)[0]
 runtime.execute(harness + '''
 http.get=function(o)
-    local bytes,status,problem=LIVE_FETCH(o.url)
+    local bytes,status,problem=LIVE_FETCH(o.url,o.headers and o.headers.Accept)
     if not bytes then return nil,problem,{getResponseCode=function() return status end,close=function() end} end
     local pos=1
     return {read=function(n) if pos>#bytes then return nil end; local part=bytes:sub(pos,pos+n-1); pos=pos+#part; return part end,close=function() end}

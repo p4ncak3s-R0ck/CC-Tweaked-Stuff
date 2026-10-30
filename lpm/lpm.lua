@@ -408,10 +408,11 @@ local function write(p,s)
 end
 local function clone(x) return data.parse(data.serialize(x)) end
 local function encode(s) return (s:gsub("[^%w_.~-]",function(c) return string.format("%%%02X",c:byte()) end)) end
-local function download(url,limit,optional)
+local function download(url,limit,optional,accept)
     assert(http and http.get,"HTTP must be enabled")
     log.debug("HTTP","GET "..log.url(url))
-    local h,e,failed=http.get({url=url,binary=true,headers={['User-Agent']='CC-LPM/0.1'}})
+    local headers={['User-Agent']='CC-LPM/0.2'}; if accept then headers.Accept=accept end
+    local h,e,failed=http.get({url=url,binary=true,headers=headers})
     if not h then
         local code=failed and failed.getResponseCode(); if failed then failed.close() end
         if optional and code==404 then log.debug("HTTP","404 (optional metadata absent)"); return nil end
@@ -429,10 +430,16 @@ local function commit(r)
     if r.ref and #r.ref==40 and r.ref:match("^%x+$") then return r.ref:lower() end
     local url="https://api.github.com/repos/"..r.github.."/commits/"..encode(r.ref or "main")
     log.info("Repository","Resolving "..r.github.." @ "..(r.ref or "main"))
-    local response=textutils.unserializeJSON(download(url,262144))
-    assert(type(response)=="table" and type(response.sha)=="string" and #response.sha==40 and response.sha:match("^%x+$"),"GitHub returned invalid commit")
-    log.debug("Repository","Pinned "..r.github.." to "..response.sha:lower())
-    return response.sha:lower()
+    -- Request the SHA representation rather than an arbitrarily large commit diff.
+    local body=download(url,4096,false,"application/vnd.github.sha")
+    local sha=body:match("^%s*(%x+)%s*$")
+    if not sha then
+        local response=textutils.unserializeJSON(body)
+        sha=type(response)=="table" and response.sha
+    end
+    assert(type(sha)=="string" and #sha==40 and sha:match("^%x+$"),"GitHub returned invalid commit")
+    log.debug("Repository","Pinned "..r.github.." to "..sha:lower())
+    return sha:lower()
 end
 local function raw(r,ref,p) return "https://raw.githubusercontent.com/"..r.github.."/"..ref.."/"..p end
 local function base(r,n) return (r.path and r.path~="" and r.path.."/" or "")..name(n) end

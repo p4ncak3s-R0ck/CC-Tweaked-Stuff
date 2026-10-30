@@ -621,4 +621,18 @@ check('Legacy official configuration resolves new sources without rewriting meta
     local before=#requests; core.install('project',nil,false,false,true); assert(#requests==before)
     assert(selfSource.github~=official.github,'Self-updates must remain independent of the package registry')
 end)
+check('Commit resolution requests SHA-only responses even for large commits',function()
+    setup({plain='*'})
+    local saved=http.get; local saw=false
+    http.get=function(o)
+        if o.url=='https://api.github.com/repos/test/packages/commits/main' then
+            assert(o.headers.Accept=='application/vnd.github.sha','Commit lookup downloaded full JSON/diff')
+            saw=true; local body=tip..'\n'; local sent=false
+            return {read=function() if sent then return nil end; sent=true; return body end,close=function() end}
+        end
+        return saved(o)
+    end
+    local ok,problem=pcall(core.install,'project'); http.get=saved
+    assert(ok,problem); assert(saw)
+end)
 print(tests..' test groups passed')
