@@ -36,13 +36,13 @@ The manifest and generated bundle versions must match. LPM checks the generated 
 
 The candidate is staged and read back before replacement. The previous script is retained as `<script>.lpm-backup`; caught replacement failures restore it. A later successful update rotates that backup. Existing unrelated backup files or staging files (`<script>.lpm-new`) are preserved and cause an error. If the computer stops between renames, restore the backup manually before using that script again. These checks validate the download's format and optional checksum; the official HTTPS source remains the trust boundary.
 
-Existing LPM builds without this command need a one-time download of the new bundle followed by `setup`. Until this PR is merged, select its branch when testing self-update; the default `main` source still contains the older release.
+Existing LPM builds without this command need a one-time download of the new bundle followed by `setup`. During development, select the PR branch when testing self-update; the default `main` source contains the most recently merged release.
 
 ## Repository setup
 
 Official repository definitions are maintained in [`official-repositories.lua`](official-repositories.lua). Edit that file and run `python lpm/tools/build.py` to update the bundled script. The generated `lpm.lua` includes the definitions, so clients do not need a second file.
 
-New projects use the built-in `official` repository: `p4ncak3s-R0ck/CC-Tweaked-Stuff` at `main`, with packages at `<name>/manifest.lua`. Install official packages directly after `lpm init`:
+New projects use the built-in `official` repository: `p4ncak3s-R0ck/LPM-Packages` at `main`. Package source, manifests, examples and tests live there; folder packages use `<name>/manifest.lua`, and standalone packages use `<name>.lua`. Install official packages directly after `lpm init`:
 
 ```text
 lpm install dns
@@ -71,6 +71,8 @@ lpm repo unuse special
 ```
 
 Pins never fall through to another repository. `official` is a reserved alias and cannot be redirected; use a custom alias to track a fork or development branch. `lpm repo official disable` removes the official source from searches (clear any package pins to it first); `enable` restores it. Explicitly adding the same GitHub repository under another alias is independent of this switch.
+
+Existing main-branch source descriptors for `CC-Tweaked-Stuff` or the renamed `LPM` repository resolve package updates from `LPM-Packages`. Stored project metadata and old lockfile hashes are preserved; locked commits still fetch the original source history. Self-updates use `LPM`, independently of the package registry.
 
 The original `lpm repo owner/repo [ref] [path]` command still sets the legacy `default` source. Existing project settings and lockfiles remain compatible. Repository edits require `lpm update` before restoring a previous lock.
 
@@ -137,6 +139,31 @@ return {
 ```
 
 Source paths are relative to the package's source directory. Destinations are relative to its installation directory. Explicit file lists avoid GitHub directory scraping. `modules` creates project-local loader files for require aliases; a library's installed `init.lua` also exports its package name. Other `.lua` paths get project-local loaders. Ordinary programs can use `require("dns")` without a special launcher or modified runtime. Installed applications get `<package-name>.lua` launch files, so run `dns-server --help` directly from the project directory. Loader files preserve the normal program environment and forward arguments. Module name conflicts and existing project files are rejected before activation.
+
+## Single-file packages
+
+A repository can publish `<name>.lua` directly at its package root, without a package directory or separate manifest. The file starts with a metadata comment and continues with ordinary Lua code:
+
+```lua
+--[=[lpm
+return {
+    manifestVersion = 1,
+    name = "hello",
+    version = "1.0.0",
+    type = "application", -- use "library" for a require-able module
+    dependencies = {},
+}
+]=]
+print("Hello from LPM!")
+```
+
+Publish this as `hello.lua` at the repository root (or its configured package subdirectory), then use `lpm install hello`. Run an application as `hello`; a library file should return its module value and can be loaded with `require("hello")`. See [`examples/hello.lua`](examples/hello.lua).
+
+A root `<name>.lua` may instead contain a plain `return { ... }` package manifest, including `files` with HTTPS proxy URLs; no metadata comment is needed for this data-only format. It uses the same manifest schema and supports root-relative files.
+
+For executable single-file packages, metadata is parsed as literal data and never executed during discovery. It requires the same schema, name, version and type as a regular manifest. Do not declare `files` or `hashes`: the containing file is the sole source and destination, and its SHA-256 is recorded in the lockfile after downloading. Application entry defaults to `<name>.lua`; optional module aliases may target that same file. Dependencies resolve across repositories as usual.
+
+LPM checks `<name>/index.lua`, then `<name>/manifest.lua`, then `<name>.lua` within each repository, before moving to the next repository. Folder packages take precedence over standalone files in that source. Single-file discovery pins the selected repository ref to a commit, downloads the file once, and reuses those bytes during staging. Subsequent locked and offline installs use the same hash checks as other packages. Standalone files use the selected ref's version; version indexes continue to describe folder manifests. The limits are 1 MiB per file and 8 MiB of prefetched standalone content per resolution.
 
 ## Proxy packages and external file sources
 
@@ -236,3 +263,7 @@ The SHA-256 implementation was extracted from your existing `dns/src/dns.lua`; i
 ## Future independent backends
 
 The GitHub backend is built in. DNS discovery, Rednet package transfer, private GitHub authentication, package search, publisher signatures, and runtime dependency sandboxing are not implemented in V1. A future Rednet backend can reuse the same manifests and lock structure without changing DNS or the broker.
+
+## Verify the published registry
+
+Run `python lpm/tests/run.py` for the simulated unit suite. Run `python lpm/tests/live_repository.py --self-ref codex/lpm-single-file-packages` from a checkout of this branch to install all 10 packages using real public GitHub HTTP responses, verify hashes and library imports, execute the standalone example, restore offline, recover corruption, and check the published self-update bundle. Requires Python `lupa` and outbound HTTPS. The live test uses an isolated in-memory CC:Tweaked filesystem and does not modify a Minecraft computer.

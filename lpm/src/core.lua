@@ -1,7 +1,12 @@
 local data, semver, sha256 = require("data"), require("semver"), require("sha256")
 local log=require("log")
 local M={version="0.2.0",log=log}
-local OFFICIAL=require("official-repositories").official
+local builtins=require("official-repositories")
+local OFFICIAL=builtins.official
+local LEGACY={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}
+local function legacyRepository(r)
+    return (r.github==LEGACY.github or r.github==builtins.selfUpdate.github) and (r.ref or "main")=="main" and (not r.path or r.path=="")
+end
 local MAX_FILE, MAX_TOTAL = 1048576, 8388608
 local function sorted(t) local a={}; for k in pairs(t) do a[#a+1]=k end; table.sort(a); return a end
 local function name(n)
@@ -55,6 +60,17 @@ local function manifest(m,n)
     if m.modules then for mod,target in pairs(m.modules) do assert(type(mod)=="string" and mod:match("^[%a_][%w_.-]*$"),"Invalid module alias"); path(target); assert(targets[target],"Module target not installed") end end
     return m
 end
+-- A standalone package is valid Lua with a non-executing metadata comment.
+local function singleManifest(bytes,n)
+    local header=bytes:match("^%s*%-%-%[=%[lpm%s*\n(.-)\n%]=%]")
+    if not header then return manifest(data.parse(bytes),n) end
+    local m=data.parse(header)
+    assert(m.files==nil,"Single-file metadata must not declare files")
+    assert(m.hashes==nil,"Single-file metadata cannot hash its own containing file")
+    m.files={[n..".lua"]=n..".lua"}
+    if m.type=="application" then m.entry=m.entry or n..".lua" end
+    return manifest(m,n)
+end
 local function read(p)
     local h,e=fs.open(p,"rb"); assert(h,e or ("Cannot read "..p)); local s=h.readAll(); h.close(); return s
 end
@@ -63,10 +79,11 @@ local function write(p,s)
 end
 local function clone(x) return data.parse(data.serialize(x)) end
 local function encode(s) return (s:gsub("[^%w_.~-]",function(c) return string.format("%%%02X",c:byte()) end)) end
-local function download(url,limit,optional)
+local function download(url,limit,optional,accept)
     assert(http and http.get,"HTTP must be enabled")
     log.debug("HTTP","GET "..log.url(url))
-    local h,e,failed=http.get({url=url,binary=true,headers={['User-Agent']='CC-LPM/0.1'}})
+    local headers={['User-Agent']='CC-LPM/0.2'}; if accept then headers.Accept=accept end
+    local h,e,failed=http.get({url=url,binary=true,headers=headers})
     if not h then
         local code=failed and failed.getResponseCode(); if failed then failed.close() end
         if optional and code==404 then log.debug("HTTP","404 (optional metadata absent)"); return nil end
@@ -84,20 +101,26 @@ local function commit(r)
     if r.ref and #r.ref==40 and r.ref:match("^%x+$") then return r.ref:lower() end
     local url="https://api.github.com/repos/"..r.github.."/commits/"..encode(r.ref or "main")
     log.info("Repository","Resolving "..r.github.." @ "..(r.ref or "main"))
-    local response=textutils.unserializeJSON(download(url,262144))
-    assert(type(response)=="table" and type(response.sha)=="string" and #response.sha==40 and response.sha:match("^%x+$"),"GitHub returned invalid commit")
-    log.debug("Repository","Pinned "..r.github.." to "..response.sha:lower())
-    return response.sha:lower()
+    -- Request the SHA representation rather than an arbitrarily large commit diff.
+    local body=download(url,4096,false,"application/vnd.github.sha")
+    local sha=body:match("^%s*(%x+)%s*$")
+    if not sha then
+        local response=textutils.unserializeJSON(body)
+        sha=type(response)=="table" and response.sha
+    end
+    assert(type(sha)=="string" and #sha==40 and sha:match("^%x+$"),"GitHub returned invalid commit")
+    log.debug("Repository","Pinned "..r.github.." to "..sha:lower())
+    return sha:lower()
 end
 local function raw(r,ref,p) return "https://raw.githubusercontent.com/"..r.github.."/"..ref.."/"..p end
 local function base(r,n) return (r.path and r.path~="" and r.path.."/" or "")..name(n) end
 local function validateProject(p)
     assert(p.manifestVersion==1,"Unsupported project schema"); name(p.name); semver.parse(p.version)
     deps(p.dependencies or {}); p.dependencies=p.dependencies or {}
-    p.repositories=p.repositories or {default=clone(OFFICIAL)}
+    p.repositories=p.repositories or {default=clone(LEGACY)}
     for k,r in pairs(p.repositories) do
         name(k); repo(r)
-        if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL),"official is a reserved repository; use another name") end
+        if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL) or legacyRepository(r),"official is a reserved repository; use another name") end
     end
     assert(p.officialRepository==nil or type(p.officialRepository)=="boolean","officialRepository must be boolean")
     local function exists(k) name(k); if k=="official" then return p.officialRepository~=false end; return p.repositories[k] end
@@ -124,6 +147,7 @@ local function repositorySources(p,n)
         if not k or seen[k] or (k=="official" and p.officialRepository==false) then return end
         local r=p.repositories[k] or (k=="official" and OFFICIAL)
         assert(r,"Unknown repository "..tostring(k))
+        if k=="official" or legacyRepository(r) then r=OFFICIAL end
         seen[k]=true; sources[#sources+1]={name=k,repository=r}
     end
     if p.packageRepositories and p.packageRepositories[n] then
@@ -227,14 +251,16 @@ local function validateLock(p,l)
         name(n); repo(x.repository); manifest(x.manifest,n)
         assert(x.version==x.manifest.version,"Invalid locked version")
         assert(type(x.commit)=="string" and #x.commit==40 and x.commit:match("^%x+$"),"Invalid locked commit")
-        path(x.base); assert(type(x.hashes)=="table","Missing hashes")
+        assert(type(x.base)=="string","Invalid locked package base")
+        if x.base~="" then path(x.base) end
+        assert(type(x.hashes)=="table","Missing hashes")
         for _,dst in pairs(x.manifest.files) do assert(type(x.hashes[dst])=="string" and #x.hashes[dst]==64 and x.hashes[dst]:match("^%x+$"),"Missing file hash") end
         for dep,r in pairs(x.manifest.dependencies or {}) do assert(l.packages[dep] and semver.satisfies(l.packages[dep].version,r),"Broken locked dependency") end
     end
     for n,r in pairs(p.dependencies) do assert(l.packages[n] and semver.satisfies(l.packages[n].version,r),"Missing locked dependency") end
     return l
 end
-local function resolve(p)
+local function resolve(p,prefetched)
     local cache,pins={},{}
     local function candidates(n)
         if cache[n] then return cache[n] end
@@ -244,8 +270,13 @@ local function resolve(p)
             local r=source.repository; local key=data.serialize(r)
             pins[key]=pins[key] or commit(r); local tip=pins[key]; local bp=base(r,n)
             local indexText=download(raw(r,tip,bp.."/index.lua"),262144,true)
-            local manifestText
+            local manifestText,singleText,singleBase,singleURL
             if not indexText then manifestText=download(raw(r,tip,bp.."/manifest.lua"),262144,true) end
+            if not indexText and not manifestText then
+                singleBase=r.path or ""
+                singleURL=raw(r,tip,(singleBase~="" and singleBase.."/" or "")..n..".lua")
+                singleText=download(singleURL,MAX_FILE,true)
+            end
             if indexText then
                 local idx=data.parse(indexText); assert(idx.indexVersion==1 and type(idx.versions)=="table","Invalid package index")
                 local count=0
@@ -259,8 +290,15 @@ local function resolve(p)
             elseif manifestText then
                 local m=manifest(data.parse(manifestText),n)
                 result[1]={version=m.version,commit=tip,base=bp,repository=clone(r),manifest=m}
+            elseif singleText then
+                local m=singleManifest(singleText,n)
+                prefetched.total=prefetched.total+#singleText
+                assert(prefetched.total<=MAX_TOTAL,"Single-file discovery exceeds 8 MiB")
+                prefetched.files[singleURL]=singleText
+                log.info("Download",n..".lua (single-file package, "..#singleText.." bytes)")
+                result[1]={version=m.version,commit=tip,base=singleBase,repository=clone(r),manifest=m}
             end
-            if indexText or manifestText then
+            if indexText or manifestText or singleText then
                 for _,c in ipairs(result) do c.repositoryName=source.name end
                 log.debug("Resolve","Found "..#result.." candidate version(s) for "..n.." in "..source.name)
                 cache[n]=result; return result
@@ -353,13 +391,14 @@ function M.install(root,spec,update,remove,offline)
     end
     local dir=fs.combine(root,".lpm"); local current=fs.combine(dir,"current"); local lockPath=fs.combine(current,"package.lock")
     local l
+    local prefetched={files={},total=0}
     if not spec and not update and fs.exists(lockPath) then
         log.info("Lock","Restoring exact versions from package.lock")
         l=validateLock(p,data.parse(read(lockPath)))
     else
         assert(not offline,"Offline install requires a matching lockfile")
         log.info("Resolve","Resolving direct and transitive dependencies")
-        l={lockVersion=1,projectHash=sha256(data.serialize(p)),packages=resolve(p)}
+        l={lockVersion=1,projectHash=sha256(data.serialize(p)),packages=resolve(p,prefetched)}
     end
     local previous=fs.exists(lockPath) and data.parse(read(lockPath)).packages or {}
     local packageCount,fileCount,removed=0,0,0
@@ -388,8 +427,14 @@ function M.install(root,spec,update,remove,offline)
                 end
                 if not bytes then
                     assert(not offline,"Offline file unavailable or corrupt: "..n.."/"..dst)
-                    log.info("Download",label..(src:sub(1,8)=="https://" and " (proxy)" or ""))
-                    bytes=download(src:sub(1,8)=="https://" and src or raw(x.repository,x.commit,x.base.."/"..src),MAX_FILE)
+                    local url=src:sub(1,8)=="https://" and src or raw(x.repository,x.commit,(x.base~="" and x.base.."/" or "")..src)
+                    if prefetched.files[url] then
+                        bytes=prefetched.files[url]; prefetched.files[url]=nil
+                        log.info("Stage",label.." (downloaded during single-file discovery)")
+                    else
+                        log.info("Download",label..(src:sub(1,8)=="https://" and " (proxy)" or ""))
+                        bytes=download(url,MAX_FILE)
+                    end
                     fetched=fetched+1
                 end
                 total=total+#bytes; assert(total<=MAX_TOTAL,"Install exceeds 8 MiB")
@@ -438,7 +483,7 @@ function M.selfUpdate(ref)
     assert(type(target)=="string" and fs.exists(target) and not fs.isDir(target),"Cannot locate running LPM script")
     log.info("Self-update","Checking official LPM source for "..target)
     local original=read(target); bundleVersion(original)
-    local r=clone(OFFICIAL); if ref then r.ref=ref end; repo(r)
+    local r=clone(builtins.selfUpdate); if ref then r.ref=ref end; repo(r)
     local pin=commit(r); local bp=base(r,"lpm")
     local m=manifest(data.parse(download(raw(r,pin,bp.."/manifest.lua"),262144)),"lpm")
     assert(m.type=="application" and m.entry=="lpm.lua","Official LPM manifest must identify lpm.lua")
