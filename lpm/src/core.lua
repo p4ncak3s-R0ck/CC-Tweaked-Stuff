@@ -1,5 +1,6 @@
 local data, semver, sha256 = require("data"), require("semver"), require("sha256")
-local M={version="0.1.0"}
+local M={version="0.2.0"}
+local OFFICIAL={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}
 local MAX_FILE, MAX_TOTAL = 1048576, 8388608
 local function sorted(t) local a={}; for k in pairs(t) do a[#a+1]=k end; table.sort(a); return a end
 local function name(n)
@@ -72,19 +73,49 @@ local function commit(r)
 end
 local function raw(r,ref,p) return "https://raw.githubusercontent.com/"..r.github.."/"..ref.."/"..p end
 local function base(r,n) return (r.path and r.path~="" and r.path.."/" or "")..name(n) end
-local function project(root)
-    local p=data.parse(read(fs.combine(root,"package.lua")))
+local function validateProject(p)
     assert(p.manifestVersion==1,"Unsupported project schema"); name(p.name); semver.parse(p.version)
     deps(p.dependencies or {}); p.dependencies=p.dependencies or {}
     p.repositories=p.repositories or {default={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}}
-    assert(p.repositories.default,"repositories.default required")
-    for k,r in pairs(p.repositories) do name(k); repo(r) end
+    for k,r in pairs(p.repositories) do
+        name(k); repo(r)
+        if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL),"official is a reserved repository; use another name") end
+    end
+    assert(p.officialRepository==nil or type(p.officialRepository)=="boolean","officialRepository must be boolean")
+    local function exists(k) name(k); if k=="official" then return p.officialRepository~=false end; return p.repositories[k] end
+    if p.defaultRepository then assert(exists(p.defaultRepository),"Unknown default repository") end
+    if p.repositoryOrder then
+        assert(type(p.repositoryOrder)=="table","repositoryOrder must be a list")
+        local seen={}
+        for i,k in pairs(p.repositoryOrder) do
+            assert(type(i)=="number" and i>=1 and i%1==0 and i<=#p.repositoryOrder,"repositoryOrder must be a dense list")
+            assert(exists(k) and not seen[k],"Unknown or duplicate ordered repository"); seen[k]=true
+        end
+    end
+    if p.packageRepositories then
+        assert(type(p.packageRepositories)=="table","packageRepositories must be a table")
+        for n,k in pairs(p.packageRepositories) do name(n); assert(exists(k),"Unknown repository "..tostring(k)) end
+    end
     if p.entry then path(p.entry) end
     return p
 end
-local function repository(p,n)
-    local key=p.packageRepositories and p.packageRepositories[n] or "default"
-    return assert(p.repositories[key],"Unknown repository "..tostring(key))
+local function project(root) return validateProject(data.parse(read(fs.combine(root,"package.lua")))) end
+local function repositorySources(p,n)
+    local sources,seen={},{}
+    local function add(k)
+        if not k or seen[k] or (k=="official" and p.officialRepository==false) then return end
+        local r=p.repositories[k] or (k=="official" and OFFICIAL)
+        assert(r,"Unknown repository "..tostring(k))
+        seen[k]=true; sources[#sources+1]={name=k,repository=r}
+    end
+    if p.packageRepositories and p.packageRepositories[n] then
+        add(p.packageRepositories[n]); assert(#sources>0,"Package repository is disabled"); return sources
+    end
+    for _,k in ipairs(p.repositoryOrder or {}) do add(k) end
+    add(p.defaultRepository or (p.repositories.default and "default"))
+    for _,k in ipairs(sorted(p.repositories)) do if k~="official" then add(k) end end
+    add("official")
+    return sources
 end
 local function recover(root)
     local dir=fs.combine(root,".lpm"); local journal=fs.combine(dir,"transaction.lua")
@@ -187,25 +218,33 @@ local function resolve(p)
     local cache,pins={},{}
     local function candidates(n)
         if cache[n] then return cache[n] end
-        local r=repository(p,n); local key=data.serialize(r)
-        pins[key]=pins[key] or commit(r); local tip=pins[key]; local bp=base(r,n)
-        local indexText=download(raw(r,tip,bp.."/index.lua"),262144,true)
         local result={}
-        if indexText then
-            local idx=data.parse(indexText); assert(idx.indexVersion==1 and type(idx.versions)=="table","Invalid package index")
-            local count=0
-            for v,entry in pairs(idx.versions) do
-                semver.parse(v); assert(type(entry)=="table" and type(entry.ref)=="string" and #entry.ref==40 and entry.ref:match("^%x+$"),"Index versions must pin full commits")
-                if entry.path then path(entry.path) end
-                count=count+1; assert(count<=128,"Too many package versions")
-                result[#result+1]={version=v,commit=entry.ref:lower(),base=entry.path or bp,repository=clone(r)}
+        for _,source in ipairs(repositorySources(p,n)) do
+            local r=source.repository; local key=data.serialize(r)
+            pins[key]=pins[key] or commit(r); local tip=pins[key]; local bp=base(r,n)
+            local indexText=download(raw(r,tip,bp.."/index.lua"),262144,true)
+            local manifestText
+            if not indexText then manifestText=download(raw(r,tip,bp.."/manifest.lua"),262144,true) end
+            if indexText then
+                local idx=data.parse(indexText); assert(idx.indexVersion==1 and type(idx.versions)=="table","Invalid package index")
+                local count=0
+                for v,entry in pairs(idx.versions) do
+                    semver.parse(v); assert(type(entry)=="table" and type(entry.ref)=="string" and #entry.ref==40 and entry.ref:match("^%x+$"),"Index versions must pin full commits")
+                    if entry.path then path(entry.path) end
+                    count=count+1; assert(count<=128,"Too many package versions")
+                    result[#result+1]={version=v,commit=entry.ref:lower(),base=entry.path or bp,repository=clone(r)}
+                end
+                table.sort(result,function(a,b) return semver.compare(a.version,b.version)>0 end)
+            elseif manifestText then
+                local m=manifest(data.parse(manifestText),n)
+                result[1]={version=m.version,commit=tip,base=bp,repository=clone(r),manifest=m}
             end
-            table.sort(result,function(a,b) return semver.compare(a.version,b.version)>0 end)
-        else
-            local m=manifest(data.parse(download(raw(r,tip,bp.."/manifest.lua"),262144)),n)
-            result[1]={version=m.version,commit=tip,base=bp,repository=clone(r),manifest=m}
+            if indexText or manifestText then
+                for _,c in ipairs(result) do c.repositoryName=source.name end
+                cache[n]=result; return result
+            end
         end
-        cache[n]=result; return result
+        error("Package not found in configured repositories: "..n,0)
     end
     local budget=0
     local function solve(chosen,requirements)
@@ -234,7 +273,50 @@ end
 function M.init(root)
     assert(not fs.exists(fs.combine(root,"package.lua")),"package.lua already exists")
     local n=fs.getName(root):lower():gsub("[^a-z0-9_-]","-"); if not n:match("^[a-z]") then n="project-"..n end
-    write(fs.combine(root,"package.lua"),data.serialize({manifestVersion=1,name=n,version="0.1.0",type="application",entry="main.lua",repositories={default={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}},dependencies={}}))
+    write(fs.combine(root,"package.lua"),data.serialize({manifestVersion=1,name=n,version="0.1.0",type="application",entry="main.lua",repositories={official=clone(OFFICIAL)},defaultRepository="official",dependencies={}}))
+end
+-- Repository edits invalidate the project hash; the next update resolves new sources.
+function M.repositories(root)
+    recover(root); local p=project(root)
+    return repositorySources(p),p
+end
+function M.configureRepository(root,action,key,value,ref,pth)
+    recover(root); local p=project(root)
+    if action=="add" or action=="legacy" then
+        name(key); assert(key~="official","official is reserved")
+        p.repositories[key]=repo({github=value,ref=ref or "main",path=pth})
+        if action=="legacy" then p.defaultRepository="default" end
+    elseif action=="remove" then
+        assert(key~="official","Use lpm repo official disable")
+        assert(p.repositories[key],"Unknown repository")
+        assert(p.defaultRepository~=key,"Select another default repository first")
+        for _,k in pairs(p.packageRepositories or {}) do assert(k~=key,"Repository is assigned to a package") end
+        p.repositories[key]=nil
+        if p.repositoryOrder then
+            local order={}; for _,k in ipairs(p.repositoryOrder) do if k~=key then order[#order+1]=k end end
+            p.repositoryOrder=order
+        end
+    elseif action=="default" then p.defaultRepository=name(key)
+    elseif action=="order" then p.repositoryOrder=key
+    elseif action=="use" then
+        name(key); name(value); p.packageRepositories=p.packageRepositories or {}; p.packageRepositories[key]=value
+    elseif action=="unuse" then name(key); if p.packageRepositories then p.packageRepositories[key]=nil end
+    elseif action=="official" then
+        assert(key=="enable" or key=="disable","Usage: lpm repo official enable|disable")
+        p.officialRepository=key=="enable"
+        if key=="disable" then
+            if p.defaultRepository=="official" then p.defaultRepository=nil end
+            if p.repositoryOrder then
+                local order={}; for _,k in ipairs(p.repositoryOrder) do if k~="official" then order[#order+1]=k end end
+                p.repositoryOrder=order
+            end
+        end
+    else error("Unknown repository action") end
+    -- Validate before replacing the user's configuration.
+    validateProject(p)
+    local candidate=data.serialize(p)
+    write(fs.combine(root,"package.lua"),candidate)
+    return p
 end
 function M.install(root,spec,update,remove,offline)
     recover(root); local p=project(root)

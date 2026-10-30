@@ -256,4 +256,93 @@ check('Setup installs the bare command and persistent shell path',function()
  assert(shell.path():find('/bin:',1,true)==1)
  rejected(function() assert(hostLoadfile('lpm.lua'))('run') end)
 end)
+local official={github='p4ncak3s-R0ck/CC-Tweaked-Stuff',ref='main'}
+local function otherPublish(r,n,v,dependencies)
+    responses['https://api.github.com/repos/'..r.github..'/commits/'..r.ref]='{"sha":"'..tip..'"}'
+    local prefix='https://raw.githubusercontent.com/'..r.github..'/'..tip..'/'..(r.path and r.path..'/' or '')..n..'/'
+    responses[prefix..'manifest.lua']=data.serialize({manifestVersion=1,name=n,version=v,type='library',files={['main.lua']='init.lua'},dependencies=dependencies or {}})
+    responses[prefix..'main.lua']='return {}'
+end
+check('New projects enable the built-in official repository',function()
+    files,dirs={}, {['']=true}; fs.makeDir('project'); core.init('project')
+    local sources,p=core.repositories('project')
+    assert(#sources==1 and sources[1].name=='official' and p.defaultRepository=='official')
+    otherPublish(official,'official-tool','1.0.0')
+    local l=core.install('project','official-tool')
+    assert(l.packages['official-tool'].repositoryName=='official')
+end)
+check('Automatic search resolves dependencies across repositories and subpaths',function()
+    setup({private='*'})
+    local extra={github='other/packages',ref='dev',path='packages'}
+    otherPublish(extra,'private','1.0.0',{plain='*',['official-tool']='*'})
+    core.configureRepository('project','add','extra',extra.github,extra.ref,extra.path)
+    local l=core.install('project')
+    assert(l.packages.private.repositoryName=='extra' and l.packages.plain.repositoryName=='default')
+    assert(l.packages['official-tool'].repositoryName=='official')
+    local before=#requests; core.install('project',nil,false,false,true); assert(#requests==before)
+end)
+check('Priority order and explicit pins resolve duplicate names deterministically',function()
+    setup({plain='*'})
+    otherPublish({github='other/packages',ref='main'},'plain','9.0.0')
+    core.configureRepository('project','add','extra','other/packages')
+    assert(core.install('project').packages.plain.version=='1.2.3')
+    core.configureRepository('project','order',{'extra','default'})
+    assert(core.install('project',nil,true).packages.plain.version=='9.0.0')
+    core.configureRepository('project','use','plain','default')
+    assert(core.install('project',nil,true).packages.plain.version=='1.2.3')
+    core.configureRepository('project','unuse','plain')
+    assert(core.install('project',nil,true).packages.plain.version=='9.0.0')
+end)
+check('Incompatible versions in the first source never select another publisher',function()
+    setup({plain='9.0.0'})
+    core.configureRepository('project','add','extra','other/packages')
+    local before=files['project/package.lua']
+    rejected(function() core.install('project') end)
+    assert(files['project/package.lua']==before and not fs.exists('project/.lpm/current'))
+end)
+check('Pinned missing packages never fall through to other sources',function()
+    setup({plain='*'}); core.configureRepository('project','use','plain','official')
+    rejected(function() core.install('project') end)
+end)
+check('Repository validation preserves configuration on invalid edits',function()
+    setup()
+    local before=files['project/package.lua']
+    for _,f in ipairs({
+        function() core.configureRepository('project','add','official','evil/packages') end,
+        function() core.configureRepository('project','add','extra','other/packages','main','../escape') end,
+        function() core.configureRepository('project','default','unknown') end,
+        function() core.configureRepository('project','order',{'default','default'}) end,
+        function() core.configureRepository('project','use','plain','unknown') end,
+    }) do rejected(f); assert(files['project/package.lua']==before) end
+    core.configureRepository('project','use','plain','default')
+    rejected(function() core.configureRepository('project','remove','default') end)
+end)
+check('Disable official source prevents requests; missing package reports failure',function()
+    setup({missing='*'}); core.configureRepository('project','official','disable')
+    local before=#requests
+    rejected(function() core.install('project') end)
+    for i=before+1,#requests do assert(not requests[i]:find(official.github,1,true)) end
+    core.configureRepository('project','official','enable')
+    assert(#core.repositories('project')==2)
+end)
+check('HTTP failures and malformed manifests do not trigger fallback',function()
+    setup({plain='*'})
+    local before=#requests; local saved=http.get
+    http.get=function(o)
+        if o.url==raw(tip,'plain/index.lua') then return nil,'HTTP 500',{getResponseCode=function() return 500 end,close=function() end} end
+        return saved(o)
+    end
+    rejected(function() core.install('project') end); http.get=saved
+    local url=raw(tip,'plain/manifest.lua'); local original=responses[url]; responses[url]='not a manifest'
+    rejected(function() core.install('project') end); responses[url]=original
+end)
+check('CLI manages repositories and preserves legacy syntax',function()
+    setup(); local cli=assert(hostLoadfile('lpm.lua'))
+    cli('repo','add','extra','other/packages'); cli('repo','default','extra')
+    cli('repo','order','extra','default'); cli('repo','use','plain','extra')
+    cli('repo','list'); cli('repo','unuse','plain'); cli('repo','default','default')
+    cli('repo','remove','extra'); cli('repo','official','disable'); cli('repo','official','enable')
+    cli('repo','test/packages','main')
+    assert(core.install('project','plain').packages.plain.repositoryName=='default')
+end)
 print(tests..' test groups passed')

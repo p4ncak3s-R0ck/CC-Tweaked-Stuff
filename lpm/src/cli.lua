@@ -1,7 +1,7 @@
 local M=require("core")
 local args={...}
 local root=shell.dir()
-local help=[=[LPM 0.1.0 - GitHub packages for CC:Tweaked
+local help=[=[LPM 0.2.0 - GitHub packages for CC:Tweaked
 lpm init                       Create package.lua
 lpm install [name[@constraint]] Install/add packages
 lpm install --offline          Restore from verified local files
@@ -11,6 +11,14 @@ lpm list                       Show locked versions and commits
 lpm verify                     Verify installed SHA-256 hashes
 lpm setup                      Make lpm available from any directory
 lpm repo owner/repo [ref] [path] Set default GitHub source
+lpm repo list                  Show repository search order
+lpm repo add name owner/repo [ref] [path]
+lpm repo remove name           Remove a repository
+lpm repo default name          Set preferred repository
+lpm repo order name ...        Set search priority
+lpm repo use package name      Pin a package to a repository
+lpm repo unuse package         Clear a package source pin
+lpm repo official enable|disable
 lpm help                       Show help
 Constraints: *, 1.2.3, ^1.2.3, ~1.2.3 (stable versions only).
 No package scripts or manifests are executed during installation.]=]
@@ -30,15 +38,32 @@ local function main()
         print("Installed "..count.." packages. Lockfile: .lpm/current/package.lock")
     elseif cmd=="list" then
         local l=M.lock(root); local names={}; for n in pairs(l.packages) do names[#names+1]=n end; table.sort(names)
-        for _,n in ipairs(names) do local x=l.packages[n]; print(n.." "..x.version.." "..x.commit:sub(1,12)) end
+        for _,n in ipairs(names) do local x=l.packages[n]; print(n.." "..x.version.." "..x.commit:sub(1,12).." ["..(x.repositoryName or x.repository.github).."]") end
     elseif cmd=="verify" then print("Verified "..M.verify(root).." files")
     elseif cmd=="setup" then assert(#args==0,"Usage: lpm setup"); M.setup(); print("lpm is available from any directory")
     elseif cmd=="repo" then
-        assert(#args>=1 and #args<=3,"Usage: lpm repo owner/repo [ref] [path]")
-        assert(args[1]:match("^[%w_.-]+/[%w_.-]+$"),"Invalid owner/repo")
-        local pth=fs.combine(root,"package.lua"); local h=assert(fs.open(pth,"r")); local p=M.data.parse(h.readAll()); h.close()
-        p.repositories=p.repositories or {}; p.repositories.default={github=args[1],ref=args[2] or "main",path=args[3]}
-        h=assert(fs.open(pth,"w")); h.write(M.data.serialize(p)); h.close(); print("Repository configured; run lpm update")
+        local action=table.remove(args,1) or "list"
+        if action=="list" then
+            assert(#args==0,"Usage: lpm repo list")
+            local sources,p=M.repositories(root)
+            for i,x in ipairs(sources) do
+                local r=x.repository
+                print(i..". "..x.name.." "..r.github.." @ "..(r.ref or "main")..(r.path and (" /"..r.path) or ""))
+            end
+            for n,k in pairs(p.packageRepositories or {}) do print(n.." -> "..k) end
+            return
+        elseif action=="add" then assert(#args>=2 and #args<=4,"Usage: lpm repo add name owner/repo [ref] [path]")
+        elseif action=="order" then assert(#args>=1,"Usage: lpm repo order name ...")
+        elseif action=="use" then assert(#args==2,"Usage: lpm repo use package repository")
+        elseif action=="remove" or action=="default" or action=="unuse" or action=="official" then assert(#args==1,"Expected one repository argument")
+        else
+            assert(action:match("^[%w_.-]+/[%w_.-]+$") and #args<=2,"Unknown repository command")
+            M.configureRepository(root,"legacy","default",action,args[1],args[2])
+            print("Repository configured; run lpm update"); return
+        end
+        if action=="order" then M.configureRepository(root,action,args)
+        else M.configureRepository(root,action,table.unpack(args)) end
+        print("Repositories configured; run lpm update")
     else error("Unknown command: "..cmd..". Run lpm help",0) end
 end
 local ok,err=pcall(main)

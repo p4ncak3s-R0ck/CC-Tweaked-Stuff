@@ -1,4 +1,4 @@
-# LPM 0.1.0
+# LPM 0.2.0
 
 A GitHub-backed package manager for CC:Tweaked. The bundled `lpm.lua` has no external Lua dependencies. DNS and message brokers are not required.
 
@@ -20,22 +20,37 @@ Create `main.lua`, then launch it normally as `main`. There is no `lpm run` or `
 
 ## Repository setup
 
-`github-ready/` contains files to copy into the root of your `CC-Tweaked-Stuff` repository. It adds DNS's package manifest, a separate DNS-server application package, and the LPM application package. Existing DNS source files are preserved. The DNS package version `2.0.0` describes the current v2 protocol; it is a proposed package release identifier.
-
-The repository must contain these manifests before `lpm install dns` can work. In a draft branch, configure the source branch first:
+New projects use the built-in `official` repository: `p4ncak3s-R0ck/CC-Tweaked-Stuff` at `main`, with packages at `<name>/manifest.lua`. Install official packages directly after `lpm init`:
 
 ```text
-lpm repo p4ncak3s-R0ck/CC-Tweaked-Stuff codex/lpm-v0.1.0
 lpm install dns
+lpm install rfs
 ```
 
-After merging, `main` is the default. You can configure any public source:
+Add other public GitHub repositories without replacing the official source:
 
 ```text
-lpm repo another-user/packages main packages
+lpm repo add community another-user/packages main packages
+lpm repo order community official
+lpm repo list
+lpm update
 ```
 
-This reads `packages/<name>/manifest.lua`. Omit `packages` to use `<name>/manifest.lua`.
+This reads `packages/<name>/manifest.lua` from the community repository. Omit the last argument for `<name>/manifest.lua`. Refs may be branches, tags, or full commit IDs.
+
+Search order is `repositoryOrder`, then `defaultRepository` (or the legacy `default` source), then remaining custom repositories alphabetically, then `official` if not already listed. New projects prefer `official`; use `repo order` to put a custom repository ahead of it. The first source containing a package owns all candidate versions of that package: LPM does not mix versions from different publishers or fall through when its versions fail constraints. Only HTTP 404 for both index and manifest means a package is absent; network errors and invalid metadata stop resolution.
+
+Pin a package, including a transitive dependency, to one source:
+
+```text
+lpm repo use dns official
+lpm repo use special community
+lpm repo unuse special
+```
+
+Pins never fall through to another repository. `official` is a reserved alias and cannot be redirected; use a custom alias to track a fork or development branch. `lpm repo official disable` removes the official source from searches (clear any package pins to it first); `enable` restores it. Explicitly adding the same GitHub repository under another alias is independent of this switch.
+
+The original `lpm repo owner/repo [ref] [path]` command still sets the legacy `default` source. Existing project settings and lockfiles remain compatible. Repository edits require `lpm update` before restoring a previous lock.
 
 ## Commands
 
@@ -49,10 +64,18 @@ This reads `packages/<name>/manifest.lua`. Omit `packages` to use `<name>/manife
 | `lpm install --offline` | Restore a matching lock using verified installed files |
 | `lpm update` | Refresh all versions within declared constraints |
 | `lpm remove dns` | Remove a direct dependency, retaining it if needed transitively |
-| `lpm list` | Show installed versions and commit IDs |
+| `lpm list` | Show installed versions, commit IDs, and source repositories |
 | `lpm verify` | Check installed SHA-256 hashes |
 | `lpm setup` | Make the bare command available from any directory and after reboot |
-| `lpm repo owner/repo [ref] [path]` | Set the default GitHub repository |
+| `lpm repo owner/repo [ref] [path]` | Set the legacy default GitHub repository |
+| `lpm repo list` | Show effective search order and package pins |
+| `lpm repo add name owner/repo [ref] [path]` | Add or replace a named source |
+| `lpm repo remove name` | Remove an unused custom source |
+| `lpm repo default name` | Select a preferred source after explicit order entries |
+| `lpm repo order name ...` | Set repository search priority |
+| `lpm repo use package name` | Assign a package to one source |
+| `lpm repo unuse package` | Clear a package source assignment |
+| `lpm repo official enable\|disable` | Toggle the built-in source |
 
 Named installs and removals resolve the entire dependency set. Ordinary `install` honors the existing lock and rejects changes to `package.lua` until you run `update`. This avoids silently changing locked versions.
 
@@ -90,7 +113,10 @@ return {
         default = { github = "user/packages", ref = "main" },
         other = { github = "someone/libraries", ref = "main" },
     },
-    packageRepositories = { special = "other" },
+    defaultRepository = "default",
+    repositoryOrder = { "default", "other", "official" },
+    officialRepository = true, -- optional; enabled unless false
+    packageRepositories = { special = "other", dns = "official" },
     dependencies = { dns = "^2.0.0", special = "1.0.0" },
 }
 ```
