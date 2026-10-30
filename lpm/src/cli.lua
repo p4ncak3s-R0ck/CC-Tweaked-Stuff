@@ -10,6 +10,7 @@ lpm remove name                Remove a direct dependency
 lpm list                       Show locked versions and commits
 lpm verify                     Verify installed SHA-256 hashes
 lpm setup                      Make lpm available from any directory
+lpm self-update [ref]          Update this LPM copy from the official source
 lpm repo owner/repo [ref] [path] Set default GitHub source
 lpm repo list                  Show repository search order
 lpm repo add name owner/repo [ref] [path]
@@ -41,6 +42,11 @@ local function main()
         for _,n in ipairs(names) do local x=l.packages[n]; print(n.." "..x.version.." "..x.commit:sub(1,12).." ["..(x.repositoryName or x.repository.github).."]") end
     elseif cmd=="verify" then print("Verified "..M.verify(root).." files")
     elseif cmd=="setup" then assert(#args==0,"Usage: lpm setup"); M.setup(); print("lpm is available from any directory")
+    elseif cmd=="self-update" then
+        assert(#args<=1,"Usage: lpm self-update [ref]")
+        local changed,version,pin=M.selfUpdate(args[1])
+        print((changed and "Updated LPM to " or "LPM is already current: ")..version.." ("..pin:sub(1,12)..")")
+        if changed then print("Previous copy: "..shell.getRunningProgram()..".lpm-backup; next invocation uses the update") end
     elseif cmd=="repo" then
         local action=table.remove(args,1) or "list"
         if action=="list" then

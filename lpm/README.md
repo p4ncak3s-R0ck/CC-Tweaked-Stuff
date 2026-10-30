@@ -18,6 +18,26 @@ main
 
 Create `main.lua`, then launch it normally as `main`. There is no `lpm run` or `lpm exec` command. The included `examples/warehouse` project loads `require("dns")`. Set your server ID and authenticate separately when you want DNS lookups.
 
+## Update LPM itself
+
+```text
+lpm self-update
+```
+
+This works from any directory, without `package.lua`. It resolves the built-in official repository's ref to a commit, reads its LPM manifest, and downloads the standalone bundle. Project repository settings and package source pins do not redirect self-updates. The command replaces the invoked script (normally `/bin/lpm.lua` after setup); the next invocation runs the new code. `lpm update` continues to update project dependencies.
+
+An optional branch, tag or full commit selects a development build:
+
+```text
+lpm self-update codex/lpm-multi-repository
+```
+
+The manifest and generated bundle versions must match. LPM checks the generated bundle header, compiles it without executing it, verifies any publisher checksum, and rejects downgrades. Identical bytes are a no-op; revised builds with the same version can update. The download is limited to 1 MiB.
+
+The candidate is staged and read back before replacement. The previous script is retained as `<script>.lpm-backup`; caught replacement failures restore it. A later successful update rotates that backup. Existing unrelated backup files or staging files (`<script>.lpm-new`) are preserved and cause an error. If the computer stops between renames, restore the backup manually before using that script again. These checks validate the download's format and optional checksum; the official HTTPS source remains the trust boundary.
+
+Existing LPM builds without this command need a one-time download of the new bundle followed by `setup`. Until this PR is merged, select its branch when testing self-update; the default `main` source still contains the older release.
+
 ## Repository setup
 
 Official repository definitions are maintained in [`official-repositories.lua`](official-repositories.lua). Edit that file and run `python lpm/tools/build.py` to update the bundled script. The generated `lpm.lua` includes the definitions, so clients do not need a second file.
@@ -69,6 +89,7 @@ The original `lpm repo owner/repo [ref] [path]` command still sets the legacy `d
 | `lpm list` | Show installed versions, commit IDs, and source repositories |
 | `lpm verify` | Check installed SHA-256 hashes |
 | `lpm setup` | Make the bare command available from any directory and after reboot |
+| `lpm self-update [ref]` | Update the invoked LPM script from the official repository |
 | `lpm repo owner/repo [ref] [path]` | Set the legacy default GitHub repository |
 | `lpm repo list` | Show effective search order and package pins |
 | `lpm repo add name owner/repo [ref] [path]` | Add or replace a named source |
