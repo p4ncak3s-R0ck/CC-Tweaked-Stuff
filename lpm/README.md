@@ -20,6 +20,8 @@ Create `main.lua`, then launch it normally as `main`. There is no `lpm run` or `
 
 ## Repository setup
 
+Official repository definitions are maintained in [`official-repositories.lua`](official-repositories.lua). Edit that file and run `python lpm/tools/build.py` to update the bundled script. The generated `lpm.lua` includes the definitions, so clients do not need a second file.
+
 New projects use the built-in `official` repository: `p4ncak3s-R0ck/CC-Tweaked-Stuff` at `main`, with packages at `<name>/manifest.lua`. Install official packages directly after `lpm init`:
 
 ```text
@@ -99,6 +101,34 @@ return {
 ```
 
 Source paths are relative to the package's source directory. Destinations are relative to its installation directory. Explicit file lists avoid GitHub directory scraping. `modules` creates project-local loader files for require aliases; a library's installed `init.lua` also exports its package name. Other `.lua` paths get project-local loaders. Ordinary programs can use `require("dns")` without a special launcher or modified runtime. Installed applications get `<package-name>.lua` launch files, so run `dns-server --help` directly from the project directory. Loader files preserve the normal program environment and forward arguments. Module name conflicts and existing project files are rejected before activation.
+
+## Proxy packages and external file sources
+
+A repository can publish a manifest that downloads files directly from HTTPS URLs. This works in official and custom repositories; the manifest and dependency metadata stay in the selected GitHub repository. Relative file sources and HTTPS sources can be mixed:
+
+```lua
+return {
+    manifestVersion = 1,
+    name = "example",
+    version = "1.0.0",
+    type = "library",
+    files = {
+        ["https://example.com/releases/1.0.0/example.lua"] = "example.lua",
+        ["https://example.com/releases/1.0.0/helpers.lua"] = "helpers.lua",
+        ["local.lua"] = "local.lua",
+    },
+    modules = { example = "example.lua" },
+    dependencies = { dns = "^2.0.0" },
+    -- Optional publisher checksums use the exact source URL as the key:
+    -- hashes = {
+    --     ["https://example.com/releases/1.0.0/example.lua"] = "<64 hex SHA-256>",
+    -- },
+}
+```
+
+Each source URL must be unique; repeating a Lua table key is rejected. Use direct file download URLs, including query strings if necessary. Only HTTPS URLs without credentials or fragments are accepted; destinations must still be safe relative paths. Additional download hosts must be allowed by the Minecraft server's HTTP configuration. Downloads retain the 1 MiB per-file and 8 MiB installation limits.
+
+LPM records the downloaded bytes' SHA-256 hashes in the lockfile. Locked restores reject changed remote content; offline restores use verified installed files. The repository commit pins the manifest, but cannot freeze an external server's content: use immutable version URLs or optional publisher hashes for reproducible first installs and updates. `lpm update` resolves again and may accept new bytes if no publisher checksum is specified. Files are downloaded directly by the client; the official repository does not relay the bytes.
 
 ## Project package.lua
 

@@ -1,6 +1,6 @@
 local data, semver, sha256 = require("data"), require("semver"), require("sha256")
 local M={version="0.2.0"}
-local OFFICIAL={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}
+local OFFICIAL=require("official-repositories").official
 local MAX_FILE, MAX_TOTAL = 1048576, 8388608
 local function sorted(t) local a={}; for k in pairs(t) do a[#a+1]=k end; table.sort(a); return a end
 local function name(n)
@@ -11,6 +11,20 @@ local function path(p)
     assert(p:sub(1,1)~="/" and p:sub(-1)~="/" and not p:find("//",1,true),"Path must be relative")
     for part in p:gmatch("[^/]+") do assert(part~="." and part~="..", "Path traversal rejected") end
     return p
+end
+-- HTTPS keys are remote file sources; destinations always remain relative paths.
+local function source(src)
+    if type(src)=="string" and src:sub(1,8)=="https://" then
+        assert(#src<=2048 and not src:find("[%c%s]") and not src:find("#",1,true),"Invalid HTTPS source URL")
+        local authority=src:match("^https://([^/?]+)")
+        assert(authority and not authority:find("@",1,true),"HTTPS source requires a host without credentials")
+        local host,port=authority:match("^([%w.-]+):(%d+)$")
+        if not host then host=authority; assert(not host:find(":",1,true),"Invalid HTTPS source host or port") end
+        assert(host:match("^[%w]") and host:match("[%w]$") and not host:find("[^%w.-]"),"Invalid HTTPS source host")
+        if port then assert(tonumber(port)>=1 and tonumber(port)<=65535,"Invalid HTTPS source port") end
+        return src
+    end
+    return path(src)
 end
 local function deps(d)
     assert(type(d)=="table", "dependencies must be a table")
@@ -32,7 +46,7 @@ local function manifest(m,n)
     assert(type(m.files)=="table" and next(m.files), "Manifest must list files")
     local targets={}; local count=0
     for src,dst in pairs(m.files) do
-        path(src); path(dst); count=count+1; assert(count<=256,"Too many files")
+        source(src); path(dst); count=count+1; assert(count<=256,"Too many files")
         assert(not targets[dst],"Duplicate install target"); targets[dst]=true
     end
     for a in pairs(targets) do for b in pairs(targets) do assert(a==b or b:sub(1,#a+1)~=a.."/","File/directory target collision") end end
@@ -76,7 +90,7 @@ local function base(r,n) return (r.path and r.path~="" and r.path.."/" or "")..n
 local function validateProject(p)
     assert(p.manifestVersion==1,"Unsupported project schema"); name(p.name); semver.parse(p.version)
     deps(p.dependencies or {}); p.dependencies=p.dependencies or {}
-    p.repositories=p.repositories or {default={github="p4ncak3s-R0ck/CC-Tweaked-Stuff",ref="main"}}
+    p.repositories=p.repositories or {default=clone(OFFICIAL)}
     for k,r in pairs(p.repositories) do
         name(k); repo(r)
         if k=="official" then assert(data.serialize(r)==data.serialize(OFFICIAL),"official is a reserved repository; use another name") end
@@ -340,7 +354,7 @@ function M.install(root,spec,update,remove,offline)
                 if previousHashes and fs.exists(existing) then
                     local old=read(existing); if sha256(old)==previousHashes[dst] then bytes=old end
                 end
-                if not bytes then assert(not offline,"Offline file unavailable or corrupt: "..n.."/"..dst); bytes=download(raw(x.repository,x.commit,x.base.."/"..src),MAX_FILE) end
+                if not bytes then assert(not offline,"Offline file unavailable or corrupt: "..n.."/"..dst); bytes=download(src:sub(1,8)=="https://" and src or raw(x.repository,x.commit,x.base.."/"..src),MAX_FILE) end
                 total=total+#bytes; assert(total<=MAX_TOTAL,"Install exceeds 8 MiB")
                 local hash=sha256(bytes); if previousHashes then assert(hash==previousHashes[dst],"SHA-256 mismatch: "..n.."/"..dst) end
                 if x.manifest.hashes and x.manifest.hashes[src] then assert(hash==x.manifest.hashes[src],"Manifest hash mismatch") end

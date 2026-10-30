@@ -345,4 +345,69 @@ check('CLI manages repositories and preserves legacy syntax',function()
     cli('repo','test/packages','main')
     assert(core.install('project','plain').packages.plain.repositoryName=='default')
 end)
+local remoteURL='https://cdn.example.com/code.lua?version=1&format=raw'
+local helperURL='https://cdn.example.com:443/helpers.lua'
+local remoteCode='return {remote=true}'
+local function proxyManifest(mapping,hashes)
+    return data.serialize({manifestVersion=1,name='proxy',version='1.0.0',type='library',
+        files=mapping or {[remoteURL]='init.lua',[helperURL]='helper.lua',['local.lua']='local.lua'},
+        hashes=hashes,modules={example='init.lua'},dependencies={plain='*'}})
+end
+responses[remoteURL]=remoteCode
+responses[helperURL]='return {helper=true}'
+responses[raw(tip,'proxy/local.lua')]='return {localFile=true}'
+check('Official definitions live in a separate file and are bundled unchanged',function()
+    local definitions=assert(hostLoadfile('official-repositories.lua'))()
+    setup(); local sources=core.repositories('project')
+    assert(data.serialize(sources[#sources].repository)==data.serialize(definitions.official))
+end)
+check('Proxy manifests mix HTTPS URLs, relative files, aliases and dependencies',function()
+    responses[raw(tip,'proxy/manifest.lua')]=proxyManifest(nil,{[remoteURL]=core.sha256(remoteCode)})
+    setup({proxy='*'}); local l=core.install('project')
+    assert(l.packages.proxy.hashes['init.lua']==core.sha256(remoteCode))
+    assert(l.packages.plain and files['project/.lpm/current/packages/proxy/local.lua'])
+    files['project/main.lua']='return require("example").remote'
+    assert(normalRun('project',{})==true and core.verify('project')==4)
+    local before=#requests; offline=true
+    core.install('project',nil,false,false,true); assert(#requests==before); offline=false
+end)
+check('Changed upstream proxy bytes fail locked restores and preserve state',function()
+    local dest='project/.lpm/current/packages/proxy/init.lua'
+    files[dest]=nil
+    local locked=files['project/.lpm/current/package.lock']; local before=files['project/package.lua']
+    responses[remoteURL]='changed upstream'
+    rejected(function() core.install('project') end)
+    assert(files['project/.lpm/current/package.lock']==locked and files['project/package.lua']==before)
+    responses[remoteURL]=remoteCode; core.install('project')
+    assert(files[dest]==remoteCode)
+end)
+check('Proxy publisher hashes and missing remote files fail before activation',function()
+    for _,hash in ipairs({string.rep('0',64),core.sha256(remoteCode)}) do
+        setup({proxy='*'}); responses[raw(tip,'proxy/manifest.lua')]=proxyManifest({[remoteURL]='init.lua'},{[remoteURL]=hash})
+        local saved=responses[remoteURL]; if hash==core.sha256(remoteCode) then responses[remoteURL]=nil end
+        rejected(function() core.install('project') end)
+        assert(not fs.exists('project/.lpm/current')); responses[remoteURL]=saved
+    end
+end)
+check('Unsafe URLs, remote destinations and duplicate targets are rejected',function()
+    local invalid={'http://cdn.example.com/a.lua','file:///tmp/a.lua','https:///a.lua',
+        'https://user:password@cdn.example.com/a.lua','https://cdn.example.com/a.lua#fragment',
+        'https://cdn.example.com/a b.lua','https://cdn.example.com:0/a.lua','https://cdn.example.com:99999/a.lua',
+        'https://cdn.example.com:/a.lua'}
+    for _,src in ipairs(invalid) do
+        setup({proxy='*'}); responses[raw(tip,'proxy/manifest.lua')]=proxyManifest({[src]='init.lua'})
+        rejected(function() core.install('project') end); assert(not fs.exists('project/.lpm/current'))
+    end
+    for _,mapping in ipairs({{[remoteURL]='../escape.lua'},{[remoteURL]='https://example.com/out.lua'},
+        {[remoteURL]='same.lua',[helperURL]='same.lua'}}) do
+        setup({proxy='*'}); responses[raw(tip,'proxy/manifest.lua')]=proxyManifest(mapping)
+        rejected(function() core.install('project') end)
+    end
+end)
+check('Proxy downloads keep the existing file size limit',function()
+    setup({proxy='*'}); responses[raw(tip,'proxy/manifest.lua')]=proxyManifest({[remoteURL]='init.lua'})
+    responses[remoteURL]=string.rep('a',1048577)
+    rejected(function() core.install('project') end); assert(not fs.exists('project/.lpm/current'))
+    responses[remoteURL]=remoteCode
+end)
 print(tests..' test groups passed')
