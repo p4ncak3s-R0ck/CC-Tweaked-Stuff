@@ -481,4 +481,67 @@ check('Self-update accepts an explicit ref and never executes downloaded code',f
     assert(files['bin/lpm.lua']:find('DO NOT EXECUTE',1,true))
     rejected(function() cli('self-update','main','extra') end)
 end)
+local function hasLog(lines,fragment)
+    for _,line in ipairs(lines) do if line:find(fragment,1,true) then return true end end
+    return false
+end
+check('Install logs expose plans, real file progress, verification and reuse counts',function()
+    setup({plain='*'}); local lines={}
+    core.log.configure({level='debug',sink=function(level,line) lines[#lines+1]=line end})
+    core.install('project')
+    assert(hasLog(lines,'[INFO][Search] plain in default'))
+    assert(hasLog(lines,'[INFO][Plan] Install plain 1.2.3'))
+    assert(hasLog(lines,'[INFO][Download] (1/1) plain/init.lua'))
+    assert(hasLog(lines,'[DEBUG][Verify] (1/1) plain/init.lua SHA-256 OK'))
+    assert(hasLog(lines,'1 downloaded, 0 reused'))
+    lines={}; core.install('project',nil,false,false,true)
+    assert(hasLog(lines,'[INFO][Lock] Restoring exact versions'))
+    assert(hasLog(lines,'0 downloaded, 1 reused'))
+    assert(not hasLog(lines,'[INFO][Download]'))
+    core.log.configure({level='error'})
+end)
+check('Failed activation logs rollback and never reports success',function()
+    setup({plain='*'}); core.install('project'); local lines={}
+    core.log.configure({level='info',sink=function(level,line) lines[#lines+1]=line end})
+    failure='project/.lpm/current'; rejected(function() core.install('project') end)
+    assert(hasLog(lines,'[WARN][Rollback]') and hasLog(lines,'[INFO][Recovery] Previous package state restored'))
+    assert(not hasLog(lines,'[INFO][Done]'))
+    core.log.configure({level='error'})
+end)
+check('Proxy URL diagnostics redact queries and credentials',function()
+    assert(core.log.url('https://user:secret@example.com/a?token=secret')=='https://[redacted]@example.com/a?...')
+    setup({proxy='*'}); responses[raw(tip,'proxy/manifest.lua')]=proxyManifest({[remoteURL]='init.lua'})
+    local lines={}; core.log.configure({level='debug',sink=function(level,line) lines[#lines+1]=line end})
+    core.install('project')
+    assert(hasLog(lines,'[INFO][Download] (') and hasLog(lines,'(proxy)'))
+    assert(hasLog(lines,'https://cdn.example.com/code.lua?...'))
+    assert(not hasLog(lines,'version=1&format=raw'))
+    core.log.configure({level='error'})
+end)
+check('A broken logging sink cannot interrupt package activation',function()
+    setup({plain='*'}); core.log.configure({level='debug',sink=function() error('display failure') end})
+    core.install('project'); assert(core.verify('project')==1)
+    core.log.configure({level='error'})
+end)
+local function captureCLI(...)
+    local output,errors={},{}
+    local oldPrint,oldError=print,printError
+    print=function(line) output[#output+1]=tostring(line) end
+    printError=function(line) errors[#errors+1]=tostring(line) end
+    local ok,problem=pcall(assert(hostLoadfile('lpm.lua')),...)
+    print,printError=oldPrint,oldError
+    return ok,output,errors,problem
+end
+check('CLI defaults to progress; verbose adds diagnostics and quiet preserves results',function()
+    setup({plain='*'}); local ok,lines=captureCLI('install')
+    assert(ok and hasLog(lines,'[INFO][Done]') and not hasLog(lines,'[DEBUG]'))
+    ok,lines=captureCLI('--verbose','install','--offline')
+    assert(ok and hasLog(lines,'[DEBUG][Cache]'))
+    ok,lines=captureCLI('install','--offline','-q')
+    assert(ok and #lines==0)
+    ok,lines=captureCLI('-q','list')
+    assert(ok and hasLog(lines,'plain 1.2.3'))
+    local errors; ok,lines,errors=captureCLI('--quiet','install','plain@9.0.0')
+    assert(not ok and #errors>0 and hasLog(errors,'[ERROR][Failed]'))
+end)
 print(tests..' test groups passed')

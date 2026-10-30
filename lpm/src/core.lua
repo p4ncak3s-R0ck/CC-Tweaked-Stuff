@@ -1,5 +1,6 @@
 local data, semver, sha256 = require("data"), require("semver"), require("sha256")
-local M={version="0.2.0"}
+local log=require("log")
+local M={version="0.2.0",log=log}
 local OFFICIAL=require("official-repositories").official
 local MAX_FILE, MAX_TOTAL = 1048576, 8388608
 local function sorted(t) local a={}; for k in pairs(t) do a[#a+1]=k end; table.sort(a); return a end
@@ -64,11 +65,12 @@ local function clone(x) return data.parse(data.serialize(x)) end
 local function encode(s) return (s:gsub("[^%w_.~-]",function(c) return string.format("%%%02X",c:byte()) end)) end
 local function download(url,limit,optional)
     assert(http and http.get,"HTTP must be enabled")
+    log.debug("HTTP","GET "..log.url(url))
     local h,e,failed=http.get({url=url,binary=true,headers={['User-Agent']='CC-LPM/0.1'}})
     if not h then
         local code=failed and failed.getResponseCode(); if failed then failed.close() end
-        if optional and code==404 then return nil end
-        error("Download failed: "..url..": "..tostring(e),0)
+        if optional and code==404 then log.debug("HTTP","404 (optional metadata absent)"); return nil end
+        error("Download failed"..(code and (" (HTTP "..code..")") or "")..": "..log.url(url)..": "..log.url(tostring(e)),0)
     end
     local chunks,total={},0
     while true do
@@ -76,13 +78,15 @@ local function download(url,limit,optional)
         total=total+#s; if total>limit then h.close(); error("Download too large: "..url,0) end
         chunks[#chunks+1]=s
     end
-    h.close(); return table.concat(chunks)
+    h.close(); log.debug("HTTP","Received "..total.." bytes"); return table.concat(chunks)
 end
 local function commit(r)
     if r.ref and #r.ref==40 and r.ref:match("^%x+$") then return r.ref:lower() end
     local url="https://api.github.com/repos/"..r.github.."/commits/"..encode(r.ref or "main")
+    log.info("Repository","Resolving "..r.github.." @ "..(r.ref or "main"))
     local response=textutils.unserializeJSON(download(url,262144))
     assert(type(response)=="table" and type(response.sha)=="string" and #response.sha==40 and response.sha:match("^%x+$"),"GitHub returned invalid commit")
+    log.debug("Repository","Pinned "..r.github.." to "..response.sha:lower())
     return response.sha:lower()
 end
 local function raw(r,ref,p) return "https://raw.githubusercontent.com/"..r.github.."/"..ref.."/"..p end
@@ -134,6 +138,7 @@ end
 local function recover(root)
     local dir=fs.combine(root,".lpm"); local journal=fs.combine(dir,"transaction.lua")
     if not fs.exists(journal) then return end
+    log.warn("Recovery","Restoring interrupted package transaction")
     local j=data.parse(read(journal)); assert(type(j.hadState)=="boolean" and type(j.hadProject)=="boolean","Invalid recovery journal")
     local current,backup=fs.combine(dir,"current"),fs.combine(dir,"previous")
     local pkg,oldpkg=fs.combine(root,"package.lua"),fs.combine(dir,"previous-package.lua")
@@ -148,6 +153,7 @@ local function recover(root)
         else assert(type(original)=="string","Invalid recovery content"); write(target,original) end
     end
     fs.delete(journal)
+    log.info("Recovery","Previous package state restored")
 end
 local function exports(root,lock)
     local out={}
@@ -234,6 +240,7 @@ local function resolve(p)
         if cache[n] then return cache[n] end
         local result={}
         for _,source in ipairs(repositorySources(p,n)) do
+            log.info("Search",n.." in "..source.name)
             local r=source.repository; local key=data.serialize(r)
             pins[key]=pins[key] or commit(r); local tip=pins[key]; local bp=base(r,n)
             local indexText=download(raw(r,tip,bp.."/index.lua"),262144,true)
@@ -255,10 +262,11 @@ local function resolve(p)
             end
             if indexText or manifestText then
                 for _,c in ipairs(result) do c.repositoryName=source.name end
+                log.debug("Resolve","Found "..#result.." candidate version(s) for "..n.." in "..source.name)
                 cache[n]=result; return result
             end
         end
-        error("Package not found in configured repositories: "..n,0)
+        error("Package not found in configured repositories: "..n.."; check lpm repo list and package source pins",0)
     end
     local budget=0
     local function solve(chosen,requirements)
@@ -273,11 +281,13 @@ local function resolve(p)
         for _,c in ipairs(candidates(missing)) do
             local fits=true; for _,r in ipairs(requirements[missing]) do if not semver.satisfies(c.version,r) then fits=false end end
             if fits then
+                log.debug("Resolve","Trying "..missing.." "..c.version)
                 if not c.manifest then c.manifest=manifest(data.parse(download(raw(c.repository,c.commit,c.base.."/manifest.lua"),262144)),missing) end
                 assert(c.manifest.version==c.version,"Index version differs from manifest")
                 local nextChosen,nextReq=clone(chosen),clone(requirements); nextChosen[missing]=clone(c)
                 for dep,r in pairs(c.manifest.dependencies or {}) do nextReq[dep]=nextReq[dep] or {}; table.insert(nextReq[dep],r) end
                 local answer=solve(nextChosen,nextReq); if answer then return answer end
+                log.debug("Resolve","Backtracking from "..missing.." "..c.version)
             end
         end
     end
@@ -333,6 +343,8 @@ function M.configureRepository(root,action,key,value,ref,pth)
     return p
 end
 function M.install(root,spec,update,remove,offline)
+    local started=os.clock()
+    log.info("Start",(remove and "Removing dependency" or update and "Updating dependencies" or "Installing dependencies")..(offline and " (offline)" or ""))
     recover(root); local p=project(root)
     if spec then
         local n,r=spec:match("^([^@]+)@(.+)$"); n=n or spec; name(n)
@@ -341,29 +353,63 @@ function M.install(root,spec,update,remove,offline)
     end
     local dir=fs.combine(root,".lpm"); local current=fs.combine(dir,"current"); local lockPath=fs.combine(current,"package.lock")
     local l
-    if not spec and not update and fs.exists(lockPath) then l=validateLock(p,data.parse(read(lockPath)))
-    else assert(not offline,"Offline install requires a matching lockfile"); l={lockVersion=1,projectHash=sha256(data.serialize(p)),packages=resolve(p)} end
+    if not spec and not update and fs.exists(lockPath) then
+        log.info("Lock","Restoring exact versions from package.lock")
+        l=validateLock(p,data.parse(read(lockPath)))
+    else
+        assert(not offline,"Offline install requires a matching lockfile")
+        log.info("Resolve","Resolving direct and transitive dependencies")
+        l={lockVersion=1,projectHash=sha256(data.serialize(p)),packages=resolve(p)}
+    end
+    local previous=fs.exists(lockPath) and data.parse(read(lockPath)).packages or {}
+    local packageCount,fileCount,removed=0,0,0
+    for _,n in ipairs(sorted(l.packages)) do
+        local x=l.packages[n]; packageCount=packageCount+1
+        for _ in pairs(x.manifest.files) do fileCount=fileCount+1 end
+        local old=previous[n]
+        local action=not old and "Install" or (old.version~=x.version or old.commit~=x.commit or data.serialize(old.repository)~=data.serialize(x.repository)) and "Update" or "Restore"
+        log.info("Plan",action.." "..n.." "..(old and old.version~=x.version and (old.version.." -> ") or "")..x.version.." ["..(x.repositoryName or x.repository.github).." "..x.commit:sub(1,12).."]")
+    end
+    for _,n in ipairs(sorted(previous)) do if not l.packages[n] then removed=removed+1; log.info("Plan","Remove "..n.." "..previous[n].version) end end
+    log.info("Plan",packageCount.." package(s), "..fileCount.." file(s), "..removed.." removal(s)")
     local stage=fs.combine(dir,"stage"); if fs.exists(stage) then fs.delete(stage) end; fs.makeDir(stage)
-    local total=0
+    local total,fetched,reused,position=0,0,0,0
     local ok,err=pcall(function()
         for _,n in ipairs(sorted(l.packages)) do
             local x=l.packages[n]; local previousHashes=x.hashes; x.hashes={}
             for _,src in ipairs(sorted(x.manifest.files)) do
                 local dst=x.manifest.files[src]; local bytes
+                position=position+1
+                local label="("..position.."/"..fileCount..") "..n.."/"..dst
                 local existing=fs.combine(current,"packages/"..n.."/"..dst)
                 if previousHashes and fs.exists(existing) then
-                    local old=read(existing); if sha256(old)==previousHashes[dst] then bytes=old end
+                    local old=read(existing); if sha256(old)==previousHashes[dst] then bytes=old; reused=reused+1; log.debug("Cache",label.." verified locally")
+                    else log.warn("Cache",n.."/"..dst.." is corrupt; fetching a fresh copy") end
                 end
-                if not bytes then assert(not offline,"Offline file unavailable or corrupt: "..n.."/"..dst); bytes=download(src:sub(1,8)=="https://" and src or raw(x.repository,x.commit,x.base.."/"..src),MAX_FILE) end
+                if not bytes then
+                    assert(not offline,"Offline file unavailable or corrupt: "..n.."/"..dst)
+                    log.info("Download",label..(src:sub(1,8)=="https://" and " (proxy)" or ""))
+                    bytes=download(src:sub(1,8)=="https://" and src or raw(x.repository,x.commit,x.base.."/"..src),MAX_FILE)
+                    fetched=fetched+1
+                end
                 total=total+#bytes; assert(total<=MAX_TOTAL,"Install exceeds 8 MiB")
                 local hash=sha256(bytes); if previousHashes then assert(hash==previousHashes[dst],"SHA-256 mismatch: "..n.."/"..dst) end
                 if x.manifest.hashes and x.manifest.hashes[src] then assert(hash==x.manifest.hashes[src],"Manifest hash mismatch") end
+                log.debug("Verify",label.." SHA-256 OK ("..#bytes.." bytes)")
                 x.hashes[dst]=hash; write(fs.combine(stage,"packages/"..n.."/"..dst),bytes)
             end
         end
+        log.info("Verify","Hashed "..fileCount.." file(s); checked available lock and publisher hashes")
+        log.info("Activate","Committing package files, module loaders and lockfile")
         activate(root,p,l,stage)
     end)
-    if not ok then recover(root); if fs.exists(stage) then fs.delete(stage) end; error(err,0) end
+    if not ok then
+        log.warn("Rollback","Installation failed; restoring previous state")
+        recover(root); if fs.exists(stage) then fs.delete(stage) end
+        log.info("Rollback","Previous installation retained")
+        error(err,0)
+    end
+    log.info("Done",string.format("%d package(s), %d file(s), %d downloaded, %d reused, %d removed; %d bytes staged in %.2fs",packageCount,fileCount,fetched,reused,removed,total,os.clock()-started))
     return l
 end
 function M.lock(root)
@@ -371,6 +417,7 @@ function M.lock(root)
     return validateLock(p,data.parse(read(fs.combine(root,".lpm/current/package.lock")))),p
 end
 function M.verify(root)
+    log.info("Verify","Checking installed files and generated loaders")
     local l=M.lock(root); local count=0
     for n,x in pairs(l.packages) do for dst,hash in pairs(x.hashes) do
         assert(sha256(read(fs.combine(root,".lpm/current/packages/"..n.."/"..dst)))==hash,"Corrupt file: "..n.."/"..dst); count=count+1
@@ -389,6 +436,7 @@ function M.selfUpdate(ref)
     -- Always update the invoked copy, independent of the current project.
     local target=shell.getRunningProgram()
     assert(type(target)=="string" and fs.exists(target) and not fs.isDir(target),"Cannot locate running LPM script")
+    log.info("Self-update","Checking official LPM source for "..target)
     local original=read(target); bundleVersion(original)
     local r=clone(OFFICIAL); if ref then r.ref=ref end; repo(r)
     local pin=commit(r); local bp=base(r,"lpm")
@@ -398,12 +446,14 @@ function M.selfUpdate(ref)
     local src
     for from,to in pairs(m.files) do if to=="lpm.lua" then src=from end end
     assert(src,"Official LPM manifest is missing lpm.lua")
+    log.info("Self-update","Downloading LPM "..m.version.." at "..pin:sub(1,12))
     local bytes=download(src:sub(1,8)=="https://" and src or raw(r,pin,bp.."/"..src),MAX_FILE)
     assert(bundleVersion(bytes)==m.version,"LPM bundle version differs from manifest")
     if m.hashes and m.hashes[src] then assert(sha256(bytes)==m.hashes[src],"LPM manifest hash mismatch") end
     local fn,err=load(bytes,"@lpm-self-update","t",{})
     assert(fn,"Downloaded LPM is invalid Lua: "..tostring(err)) -- Compile only; never execute the download here.
-    if bytes==original then return false,m.version,pin end
+    log.info("Verify","LPM header, version, Lua syntax and available checksum validated")
+    if bytes==original then log.info("Self-update","Already current; no files changed"); return false,m.version,pin end
     local pending,backup=target..".lpm-new",target..".lpm-backup"
     assert(not fs.exists(pending),"Update staging file already exists: "..pending)
     if fs.exists(backup) then
@@ -412,6 +462,7 @@ function M.selfUpdate(ref)
     end
     local moved=false
     local ok,problem=pcall(function()
+        log.info("Self-update","Staging "..#bytes.." bytes; backup: "..backup)
         write(pending,bytes); assert(read(pending)==bytes,"LPM staging verification failed")
         assert(read(target)==original,"Running LPM changed during update")
         if fs.exists(backup) then fs.delete(backup) end
@@ -420,6 +471,7 @@ function M.selfUpdate(ref)
         assert(read(target)==bytes,"LPM replacement verification failed")
     end)
     if not ok then
+        log.warn("Rollback","Self-update failed; preserving previous LPM script")
         if moved then
             if fs.exists(target) then fs.delete(target) end
             fs.move(backup,target)
@@ -427,6 +479,7 @@ function M.selfUpdate(ref)
         if fs.exists(pending) then fs.delete(pending) end
         error(problem,0)
     end
+    log.info("Done","Updated LPM to "..m.version.."; next invocation uses the new script")
     return true,m.version,pin
 end
 function M.setup()

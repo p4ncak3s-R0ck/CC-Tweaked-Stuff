@@ -102,6 +102,21 @@ The original `lpm repo owner/repo [ref] [path]` command still sets the legacy `d
 
 Named installs and removals resolve the entire dependency set. Ordinary `install` honors the existing lock and rejects changes to `package.lua` until you run `update`. This avoids silently changing locked versions.
 
+## Progress and diagnostics
+
+Commands show labeled progress by default: repository searches, dependency resolution, an install/update/restore/remove plan, numbered file downloads, SHA-256 processing, transaction activation, and a final summary. The summary reports package/file counts, downloads, verified local reuse, removals, bytes staged, and elapsed time. Cached files do not appear as new downloads. A `Restore` plan entry means the version and source commit are unchanged; proxy file contents may still be fetched when resolving again.
+
+```text
+lpm install dns
+lpm --verbose update
+lpm install --offline --quiet
+lpm self-update -v
+```
+
+`--verbose` / `-v` adds HTTP requests and response sizes, optional metadata misses, pinned commits, candidate versions and backtracking, per-file hash checks, and cache reuse. `--quiet` / `-q` suppresses progress and completion messages while preserving warnings, errors, and requested data such as `list`, repository listings, help, and version output. Flags may appear before or after the command; quiet takes precedence if both are given.
+
+Failures use an `[ERROR][Failed]` message. Transaction recovery and rollback report their progress, and failed operations never emit a success summary. Self-updates show the selected source, version, validation, staging, and backup path. URL queries and credentials are redacted in diagnostic URLs. Logging failures cannot interrupt package activation or rollback. Output is written to the terminal; no log file is created automatically.
+
 ## Package manifest
 
 ```lua
