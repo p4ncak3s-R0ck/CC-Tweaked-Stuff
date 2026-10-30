@@ -138,6 +138,29 @@ return {
 
 Source paths are relative to the package's source directory. Destinations are relative to its installation directory. Explicit file lists avoid GitHub directory scraping. `modules` creates project-local loader files for require aliases; a library's installed `init.lua` also exports its package name. Other `.lua` paths get project-local loaders. Ordinary programs can use `require("dns")` without a special launcher or modified runtime. Installed applications get `<package-name>.lua` launch files, so run `dns-server --help` directly from the project directory. Loader files preserve the normal program environment and forward arguments. Module name conflicts and existing project files are rejected before activation.
 
+## Single-file packages
+
+A repository can publish `<name>.lua` directly at its package root, without a package directory or separate manifest. The file starts with a metadata comment and continues with ordinary Lua code:
+
+```lua
+--[=[lpm
+return {
+    manifestVersion = 1,
+    name = "hello",
+    version = "1.0.0",
+    type = "application", -- use "library" for a require-able module
+    dependencies = {},
+}
+]=]
+print("Hello from LPM!")
+```
+
+Publish this as `hello.lua` at the repository root (or its configured package subdirectory), then use `lpm install hello`. Run an application as `hello`; a library file should return its module value and can be loaded with `require("hello")`. See [`examples/hello.lua`](examples/hello.lua).
+
+Metadata is parsed as literal data and never executed during discovery. It requires the same schema, name, version and type as a regular manifest. Do not declare `files` or `hashes`: the containing file is the sole source and destination, and its SHA-256 is recorded in the lockfile after downloading. Application entry defaults to `<name>.lua`; optional module aliases may target that same file. Dependencies resolve across repositories as usual.
+
+LPM checks `<name>/index.lua`, then `<name>/manifest.lua`, then `<name>.lua` within each repository, before moving to the next repository. Folder packages take precedence over standalone files in that source. Single-file discovery pins the selected repository ref to a commit, downloads the file once, and reuses those bytes during staging. Subsequent locked and offline installs use the same hash checks as other packages. Standalone files use the selected ref's version; version indexes continue to describe folder manifests. The limits are 1 MiB per file and 8 MiB of prefetched standalone content per resolution.
+
 ## Proxy packages and external file sources
 
 A repository can publish a manifest that downloads files directly from HTTPS URLs. This works in official and custom repositories; the manifest and dependency metadata stay in the selected GitHub repository. Relative file sources and HTTPS sources can be mixed:

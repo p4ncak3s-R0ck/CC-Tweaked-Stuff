@@ -544,4 +544,60 @@ check('CLI defaults to progress; verbose adds diagnostics and quiet preserves re
     local errors; ok,lines,errors=captureCLI('--quiet','install','plain@9.0.0')
     assert(not ok and #errors>0 and hasLog(errors,'[ERROR][Failed]'))
 end)
+local function standalone(n,kind,code,dependencies)
+    return '--[=[lpm\n'..data.serialize({manifestVersion=1,name=n,version='1.0.0',type=kind,dependencies=dependencies or {}})..'\n]=]\n'..code
+end
+local soloURL=raw(tip,'solo.lua')
+check('Standalone library installs from repository root without executing discovery code',function()
+    setup({solo='*'})
+    responses[soloURL]=standalone('solo','library','return {ok=true}')
+    local before=#requests; local l=core.install('project')
+    assert(l.packages.solo.base=='' and l.packages.solo.manifest.files['solo.lua']=='solo.lua')
+    local downloads=0; for i=before+1,#requests do if requests[i]==soloURL then downloads=downloads+1 end end
+    assert(downloads==1,'Standalone code was fetched more than once')
+    files['project/main.lua']='return require("solo").ok'; assert(normalRun('project',{})==true)
+    assert(core.verify('project')==1)
+    before=#requests; core.install('project',nil,false,false,true); assert(#requests==before)
+    core.lock('project') -- Empty root base remains valid on locked restores.
+end)
+check('Standalone applications support arguments, dependencies, repository paths and pins',function()
+    setup({solo='*'}); core.configureRepository('project','add','nested','other/standalone','main','packages')
+    core.configureRepository('project','use','solo','nested')
+    responses['https://api.github.com/repos/other/standalone/commits/main']='{"sha":"'..tip..'"}'
+    local url='https://raw.githubusercontent.com/other/standalone/'..tip..'/packages/solo.lua'
+    responses[url]=standalone('solo','application','return ...',{plain='*'})
+    local l=core.install('project'); assert(l.packages.solo.base=='packages' and l.packages.plain)
+    assert(normalRun('project',{'argument'},'solo')=='argument')
+    core.install('project',nil,false,false,true)
+end)
+check('Standalone corrupt files restore only from locked matching bytes',function()
+    setup({solo='*'}); local bytes=standalone('solo','library','return {}'); responses[soloURL]=bytes
+    core.install('project'); files['project/.lpm/current/packages/solo/solo.lua']='corrupt'
+    rejected(function() core.install('project',nil,false,false,true) end)
+    responses[soloURL]=bytes..'-- changed\n'
+    rejected(function() core.install('project') end)
+    responses[soloURL]=bytes; core.install('project'); assert(core.verify('project')==1)
+end)
+check('Malformed standalone metadata cannot run code or select other files',function()
+    for _,bytes in ipairs({
+        'error("not metadata")',
+        '--[=[lpm\nreturn {name=os.getComputerID()}\n]=]\nreturn {}',
+        standalone('different','library','return {}'),
+        '--[=[lpm\nreturn {manifestVersion=1,name="solo",version="1.0.0",type="library",files={}}\n]=]\nreturn {}',
+        '--[=[lpm\nreturn {manifestVersion=1,name="solo",version="1.0.0",type="library",hashes={}}\n]=]\nreturn {}',
+        '--[=[lpm\nreturn {manifestVersion=1,name="solo",version="1.0.0",type="application",entry="../outside"}\n]=]\nreturn {}',
+    }) do
+        setup({solo='*'}); responses[soloURL]=bytes
+        rejected(function() core.install('project') end); assert(not fs.exists('project/.lpm/current'))
+    end
+end)
+check('Folder manifests take precedence over standalone files in the same source',function()
+    setup({plain='*'}); responses[raw(tip,'plain.lua')]='malformed standalone'
+    assert(core.install('project').packages.plain.version=='1.2.3')
+end)
+check('Standalone size limits and missing packages preserve existing project files',function()
+    setup({solo='*'}); responses[soloURL]=string.rep('a',1048577)
+    rejected(function() core.install('project') end); assert(not fs.exists('project/.lpm/current'))
+    responses[soloURL]=nil; rejected(function() core.install('project') end)
+end)
 print(tests..' test groups passed')
