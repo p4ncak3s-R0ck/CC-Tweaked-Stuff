@@ -1,0 +1,14 @@
+{
+  "1.21": {"format": [48, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21"},
+  "1.21.1": {"format": [48, 0], "source": "https://feedback.minecraft.net/hc/en-us/articles/29100721259021-Minecraft-Java-Edition-1-21-1", "inherits": "1.21"},
+  "1.21.2": {"format": [57, 0], "source": "https://feedback.minecraft.net/hc/en-us/articles/31261174284557-Minecraft-Java-Edition-1-21-2-Bundles-of-Bravery"},
+  "1.21.3": {"format": [57, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-3", "inherits": "1.21.2"},
+  "1.21.4": {"format": [61, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-4"},
+  "1.21.5": {"format": [71, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-5"},
+  "1.21.6": {"format": [80, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-6"},
+  "1.21.7": {"format": [81, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-7"},
+  "1.21.8": {"format": [81, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-8", "inherits": "1.21.7"},
+  "1.21.9": {"format": [88, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-9"},
+  "1.21.10": {"format": [88, 0], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-10", "inherits": "1.21.9"},
+  "1.21.11": {"format": [94, 1], "source": "https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-11"}
+}
