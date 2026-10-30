@@ -1,5 +1,5 @@
 local C = require("rfs_crypto")
-local M = { protocol = "rednet-files-v1", version = 1, maxFile = 1048576, maxChunk = 8192 }
+local M = { protocol = "rfs-v1", version = 1, maxFile = 1048576, maxChunk = 8192 }
 M.crypto = C
 function M.check(test, code, message)
     if not test then error({code=code, message=message or code}, 0) end
