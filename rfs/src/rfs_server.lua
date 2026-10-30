@@ -71,7 +71,9 @@ function M.new(config)
             local object=fs.combine(self.state,'objects/'..hash)
             if not fs.exists(object) then U.write(object,bytes) end
         end
-        item.current=v; item.versions[#item.versions+1]=v; self.index.paths[key]=item
+        -- textutils.serializeJSON rejects repeated table identities, not just
+        -- cycles. Persist independent metadata objects for current and history.
+        item.current=C.clone(v); item.versions[#item.versions+1]=v; self.index.paths[key]=item
         self:event(share,path,bytes and 'changed' or 'deleted',rev); self:save(); return v
     end
     function S:stat(share,path,revision)
