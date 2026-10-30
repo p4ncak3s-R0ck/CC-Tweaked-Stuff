@@ -37,6 +37,8 @@ check('Updater LPM install, transitive DNS/RFS dependencies and command loader',
     local lock=core.install('updater-project')
     assert(lock.packages.dns and lock.packages.rfs and lock.packages.updater and lock.packages.update)
     normalRun('updater-project',{'--help'},'update')
+    put('updater-project/main.lua','return type(require("updater").open)')
+    assert(normalRun('updater-project')=='function')
 end)
 check('SRV priority ordering, multiple ID records, failover and direct root install',function()
     put('shared/meter.os.lua',old)
@@ -146,6 +148,65 @@ check('Auto launcher waits ten seconds per check and reboots only for changed co
         parallel={waitForAny=function(run,watch) watch() end}}, {__index=_G})
     local success,err=pcall(assert(load(source,'@update/main.lua','t',env)),'auto','auto-test.json')
     assert(not success and tostring(err):find('TEST_REBOOT') and rebooted and polls==3 and waits==2)
+end)
+
+local function withLauncher(fixtures,fn)
+    local names={'shell','parallel','sleep','os','printError'}
+    local saved={}; for _,name in ipairs(names) do saved[name]=_G[name] end
+    local original=updater.new
+    updater.new=fixtures.new
+    for _,name in ipairs(names) do if fixtures[name]~=nil then _G[name]=fixtures[name] end end
+    local success,err=pcall(fn)
+    updater.new=original
+    for _,name in ipairs(names) do _G[name]=saved[name] end
+    assert(success,err)
+end
+check('open API reads config, launches root Lua and forwards arguments',function()
+    local polled,ran=false,false
+    withLauncher({new=function(c)
+        assert(c.dnsServer==42 and c.file=='meter.os.lua' and c.path=='meter.os.lua' and c.interval==10)
+        assert(c.background==false and c.reboot==true)
+        return {destination='/meter.os.lua',poll=function() polled=true; return false end}
+    end,shell={run=function(path,arg) assert(path=='/meter.os.lua' and arg=='left'); ran=true; return true end}},function()
+        assert(updater.open('/meter.os.lua',{background=false,args={'left'}}))
+    end)
+    assert(polled and ran)
+end)
+check('open API reports offline checks but launches the existing local copy',function()
+    local reported,ran=false,false
+    withLauncher({new=function(c)
+        assert(c.dnsServer==99 and c.path=='apps/meter.os.lua' and c.interval==20)
+        return {destination='/meter.os.lua',poll=function() error('offline') end}
+    end,printError=function(e) assert(e:find('offline')); reported=true end,
+    shell={run=function() ran=true; return true end}},function()
+        assert(updater.open('meter.os.lua',{configPath=false,dnsServer=99,path='apps/meter.os.lua',interval=20,background=false,reboot=false}))
+    end)
+    assert(reported and ran)
+end)
+check('open API polls at ten seconds and reboots only when background content changes',function()
+    local polls,waits,rebooted=0,0,false
+    withLauncher({new=function(c)
+        assert(c.background and c.reboot and c.interval==10)
+        return {destination='/meter.os.lua',poll=function() polls=polls+1; return polls==3 end}
+    end,sleep=function(t) assert(t==10); waits=waits+1 end,
+    parallel={waitForAny=function(run,watch) watch() end},
+    os=setmetatable({reboot=function() rebooted=true; error('TEST_REBOOT') end},{__index=os})},function()
+        local success,err=pcall(updater.open,'meter.os.lua')
+        assert(not success and tostring(err):find('TEST_REBOOT'))
+    end)
+    assert(polls==3 and waits==2 and rebooted)
+end)
+check('open API rejects unsafe filenames, bad options, and missing initial installs',function()
+    rejected(function() updater.open('../bad.lua') end)
+    rejected(function() updater.open('folder/bad.lua') end)
+    rejected(function() updater.open('meter.os.lua',{interval=0}) end)
+    rejected(function() updater.open('meter.os.lua',{args={true}}) end)
+    withLauncher({new=function(c)
+        assert(c.file=='missing.lua' and c.path=='missing.lua')
+        return {destination='/missing.lua',poll=function() return false end}
+    end,shell={run=function() error('Must not launch a missing file') end}},function()
+        rejected(function() updater.open('missing.lua') end)
+    end)
 end)
 
 print('All updater checks passed ('..tests..' total checks including RFS)')

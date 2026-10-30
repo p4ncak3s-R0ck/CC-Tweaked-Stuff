@@ -151,4 +151,58 @@ function M.new(config,dependencies)
     end
     return self
 end
+-- Launch a managed root Lua file, checking for updates before and during its run.
+function M.open(luaFilePath,options)
+    options=options or {}
+    need(type(options)=='table','Expected an options table')
+    need(type(luaFilePath)=='string','Expected a Lua filename')
+    local file=luaFilePath:gsub('^/','')
+    need(file:match('^[%w_-][%w_.-]*%.lua$') and not file:find('%.rfs%-'),'Expected a root Lua filename, such as /meter.os.lua')
+    local config={}
+    local configPath=options.configPath
+    if configPath~=false then
+        configPath=configPath or '/update-config.json'
+        need(type(configPath)=='string' and configPath~='','Invalid configuration path')
+        U.recover(configPath)
+        if fs.exists(configPath) then config=U.load(configPath) end
+    end
+    local configuredFile=config.file or fs.getName(config.path or 'meter.os.lua')
+    if not options.path and configuredFile~=file then config.path=file end
+    for key,value in pairs(options) do
+        if key~='configPath' and key~='args' then config[key]=value end
+    end
+    config.file=file
+    config.path=config.path or file
+    config.interval=config.interval or 10
+    -- Like `update auto`, default to activating background updates by reboot.
+    -- Callers can explicitly disable either behavior in the options table.
+    config.background=options.background~=false
+    config.reboot=options.reboot~=false
+    need(type(config.interval)=='number' and config.interval>=10 and config.interval<=86400,'interval must be 10..86400 seconds')
+    local args=options.args or {}
+    need(C.array(args,128),'args must be an array of at most 128 strings')
+    for _,arg in ipairs(args) do need(type(arg)=='string','Program arguments must be strings') end
+    local app=M.new(config)
+    local function attempt()
+        local ok,changed=pcall(function() return app:poll() end)
+        if not ok then
+            (printError or print)('Update failed: '..message(changed))
+        elseif changed then print('Updated '..app.destination) end
+        return ok and changed
+    end
+    attempt()
+    need(fs.exists(app.destination),'No local program installed; update servers must be reachable for the first download')
+    local function run()
+        need(shell.run(app.destination,table.unpack(args)),'Program exited with an error; use update rollback if needed')
+    end
+    if not config.background then run() else
+        parallel.waitForAny(run,function()
+            while true do
+                sleep(config.interval)
+                if attempt() and config.reboot then os.reboot() end
+            end
+        end)
+    end
+    return true
+end
 return M

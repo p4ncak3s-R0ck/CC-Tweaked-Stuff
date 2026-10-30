@@ -124,6 +124,30 @@ Public DNS and public RFS do not prove publisher identity: the fetched hash dete
 
 This updates the configured root file, including a program's own on-disk code when it is `meter.os.lua`; the separate LPM updater/runtime dependencies are maintained through `lpm update`.
 
+## Launching through the Lua API
+
+Use the library under a local variable named `update`:
+
+```lua
+local update = require("updater")
+update.open("/meter.os.lua")
+```
+
+This reads DNS/share/remote-path settings from `/update-config.json`, checks for changed file contents, launches `/meter.os.lua`, and keeps checking while it runs. Like `update auto`, it enables background polling and reboot after background updates by default. It uses the configured interval, or 10 seconds if none is configured. Network failures are reported and the local copy still starts. It returns true when the launched program exits successfully; initial-install or application failures raise an error. The launcher must be started again at boot for reboot activation to work.
+
+For explicit settings or arguments:
+
+```lua
+local update = require("updater")
+update.open("meter.os.lua", {
+    dnsServer = 42,
+    interval = 10,
+    args = {"--display", "left"},
+})
+```
+
+`configPath` selects a different config file; `configPath=false` uses only supplied options and built-in defaults. Options override config settings. `background=false` checks only before launch, and `reboot=false` installs background updates for the next launch without rebooting. Root filenames with or without a leading slash are accepted. Use `path="apps/meter.os.lua"` to choose a different share-relative source; the installed destination remains `/meter.os.lua`. Opening a different filename selects that filename on the share unless you supply `path` explicitly. This API is a blocking launcher: put it in startup or another wrapper, rather than inside the file it launches.
+
 ## Library integration
 
 A program can check for its own replacement without a separate launch wrapper:
