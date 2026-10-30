@@ -484,15 +484,22 @@ function M.selfUpdate(ref)
     log.info("Self-update","Checking official LPM source for "..target)
     local original=read(target); bundleVersion(original)
     local r=clone(builtins.selfUpdate); if ref then r.ref=ref end; repo(r)
-    local pin=commit(r); local bp=base(r,"lpm")
-    local m=manifest(data.parse(download(raw(r,pin,bp.."/manifest.lua"),262144)),"lpm")
+    local pin=commit(r); local bp=r.path or ""
+    local function at(p) return (bp~="" and bp.."/" or "")..p end
+    local metadata=download(raw(r,pin,at("manifest.lua")),262144,true)
+    if not metadata then
+        bp=at("lpm")
+        log.debug("Self-update","Checking legacy repository layout at "..bp)
+        metadata=download(raw(r,pin,at("manifest.lua")),262144)
+    end
+    local m=manifest(data.parse(metadata),"lpm")
     assert(m.type=="application" and m.entry=="lpm.lua","Official LPM manifest must identify lpm.lua")
     assert(semver.compare(m.version,M.version)>=0,"Refusing to downgrade LPM")
     local src
     for from,to in pairs(m.files) do if to=="lpm.lua" then src=from end end
     assert(src,"Official LPM manifest is missing lpm.lua")
     log.info("Self-update","Downloading LPM "..m.version.." at "..pin:sub(1,12))
-    local bytes=download(src:sub(1,8)=="https://" and src or raw(r,pin,bp.."/"..src),MAX_FILE)
+    local bytes=download(src:sub(1,8)=="https://" and src or raw(r,pin,at(src)),MAX_FILE)
     assert(bundleVersion(bytes)==m.version,"LPM bundle version differs from manifest")
     if m.hashes and m.hashes[src] then assert(sha256(bytes)==m.hashes[src],"LPM manifest hash mismatch") end
     local fn,err=load(bytes,"@lpm-self-update","t",{})

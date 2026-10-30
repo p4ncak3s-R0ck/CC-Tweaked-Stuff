@@ -635,4 +635,14 @@ check('Commit resolution requests SHA-only responses even for large commits',fun
     local ok,problem=pcall(core.install,'project'); http.get=saved
     assert(ok,problem); assert(saw)
 end)
+check('Self-update checks the repository root before the legacy directory',function()
+    prepareSelf()
+    local rootPrefix='https://raw.githubusercontent.com/'..selfSource.github..'/'..selfTip..'/'
+    responses[rootPrefix..'manifest.lua']=responses[selfPrefix..'manifest.lua']
+    responses[rootPrefix..'lpm.lua']=newBundle
+    local before=#requests
+    assert(core.selfUpdate())
+    for i=before+1,#requests do assert(requests[i]~=rootPrefix..'lpm/manifest.lua','Root update used the obsolete nested layout') end
+    responses[rootPrefix..'manifest.lua']=nil; responses[rootPrefix..'lpm.lua']=nil
+end)
 print(tests..' test groups passed')
