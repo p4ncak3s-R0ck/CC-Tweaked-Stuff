@@ -92,7 +92,19 @@ local function rejected(fn)
     local ok=pcall(fn); assert(not ok,'Expected rejection')
 end
 
-textutils.serializeJSON=data.serialize
+-- CC:Tweaked rejects repeated table identities, even without a cycle.
+-- Keep that restriction in the fixture: the data serializer alone permits aliases.
+textutils.serializeJSON=function(value)
+    local seen={}
+    local function visit(v)
+        if type(v)~='table' then return end
+        assert(not seen[v], 'Cannot serialize table with repeated entries')
+        seen[v]=true
+        for _,child in pairs(v) do visit(child) end
+    end
+    visit(value)
+    return data.serialize(value)
+end
 local originalJSON=textutils.unserializeJSON
 textutils.unserializeJSON=function(s) if s:sub(1,1)=='{' then return originalJSON(s) end; return data.parse(s) end
 
@@ -270,5 +282,20 @@ check('Native Rednet client path receives notifications and correlated replies',
     end,receive=function() local q=table.remove(queue,1); return q and q[1],q and q[2] end}
     local network=rfs.connect(7); assert(ok(network:hello()).server==7)
     assert(network:nextEvent(0).event.sequence==1)
+end)
+check('JSON snapshot persistence keeps current and history as independent tables',function()
+    put('shared/serialization.lua','return 1')
+    local first=ok(public:stat('public','serialization.lua'))
+    local item=server.index.paths['public/serialization.lua']
+    assert(item.current~=item.versions[1])
+    assert(item.current.revision==item.versions[1].revision)
+    put('shared/serialization.lua','return 2')
+    local second=ok(public:stat('public','serialization.lua'))
+    assert(second.revision~=first.revision and #item.versions==2)
+    local saved=hostRequire('rfs_common').load('/private/index.json')
+    local persisted=saved.paths['public/serialization.lua']
+    assert(persisted.current.hash==rfs.hash('return 2'))
+    assert(persisted.versions[1].hash==rfs.hash('return 1'))
+    assert(ok(public:stat('public','serialization.lua')).revision==second.revision)
 end)
 print(tests..' RFS checks passed')
