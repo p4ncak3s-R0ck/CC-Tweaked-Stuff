@@ -10,3 +10,7 @@
 - GitHub ref lookup requests the SHA representation so large commits do not break package installation or self-update.
 
 Use `lpm self-update` to refresh an installed copy, and `lpm update` inside a project to resolve packages from the new official source.
+
+## Repository root layout
+
+The contents of the old `lpm/` directory now live at repository root, including `lpm.lua`, `manifest.lua`, `official-repositories.lua`, `src/`, `tests/`, `tools/` and `examples/`. Self-update checks the root first and supports historical nested refs. See README for the one-time upgrade command for older clients.
