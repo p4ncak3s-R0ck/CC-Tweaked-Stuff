@@ -1,0 +1,10 @@
+{
+  "dnsServer": 42,
+  "service": "update.server.pancakes",
+  "share": "public",
+  "path": "meter.os.lua",
+  "file": "meter.os.lua",
+  "interval": 300,
+  "background": true,
+  "reboot": false
+}
