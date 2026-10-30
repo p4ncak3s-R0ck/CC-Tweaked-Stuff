@@ -1,4 +1,4 @@
-# LPM 0.1.0
+# LPM 0.2.0
 
 A GitHub-backed package manager for CC:Tweaked. The bundled `lpm.lua` has no external Lua dependencies. DNS and message brokers are not required.
 
@@ -18,24 +18,61 @@ main
 
 Create `main.lua`, then launch it normally as `main`. There is no `lpm run` or `lpm exec` command. The included `examples/warehouse` project loads `require("dns")`. Set your server ID and authenticate separately when you want DNS lookups.
 
+## Update LPM itself
+
+```text
+lpm self-update
+```
+
+This works from any directory, without `package.lua`. It resolves the built-in official repository's ref to a commit, reads its LPM manifest, and downloads the standalone bundle. Project repository settings and package source pins do not redirect self-updates. The command replaces the invoked script (normally `/bin/lpm.lua` after setup); the next invocation runs the new code. `lpm update` continues to update project dependencies.
+
+An optional branch, tag or full commit selects a development build:
+
+```text
+lpm self-update codex/lpm-multi-repository
+```
+
+The manifest and generated bundle versions must match. LPM checks the generated bundle header, compiles it without executing it, verifies any publisher checksum, and rejects downgrades. Identical bytes are a no-op; revised builds with the same version can update. The download is limited to 1 MiB.
+
+The candidate is staged and read back before replacement. The previous script is retained as `<script>.lpm-backup`; caught replacement failures restore it. A later successful update rotates that backup. Existing unrelated backup files or staging files (`<script>.lpm-new`) are preserved and cause an error. If the computer stops between renames, restore the backup manually before using that script again. These checks validate the download's format and optional checksum; the official HTTPS source remains the trust boundary.
+
+Existing LPM builds without this command need a one-time download of the new bundle followed by `setup`. Until this PR is merged, select its branch when testing self-update; the default `main` source still contains the older release.
+
 ## Repository setup
 
-`github-ready/` contains files to copy into the root of your `CC-Tweaked-Stuff` repository. It adds DNS's package manifest, a separate DNS-server application package, and the LPM application package. Existing DNS source files are preserved. The DNS package version `2.0.0` describes the current v2 protocol; it is a proposed package release identifier.
+Official repository definitions are maintained in [`official-repositories.lua`](official-repositories.lua). Edit that file and run `python lpm/tools/build.py` to update the bundled script. The generated `lpm.lua` includes the definitions, so clients do not need a second file.
 
-The repository must contain these manifests before `lpm install dns` can work. In a draft branch, configure the source branch first:
+New projects use the built-in `official` repository: `p4ncak3s-R0ck/CC-Tweaked-Stuff` at `main`, with packages at `<name>/manifest.lua`. Install official packages directly after `lpm init`:
 
 ```text
-lpm repo p4ncak3s-R0ck/CC-Tweaked-Stuff codex/lpm-v0.1.0
 lpm install dns
+lpm install rfs
 ```
 
-After merging, `main` is the default. You can configure any public source:
+Add other public GitHub repositories without replacing the official source:
 
 ```text
-lpm repo another-user/packages main packages
+lpm repo add community another-user/packages main packages
+lpm repo order community official
+lpm repo list
+lpm update
 ```
 
-This reads `packages/<name>/manifest.lua`. Omit `packages` to use `<name>/manifest.lua`.
+This reads `packages/<name>/manifest.lua` from the community repository. Omit the last argument for `<name>/manifest.lua`. Refs may be branches, tags, or full commit IDs.
+
+Search order is `repositoryOrder`, then `defaultRepository` (or the legacy `default` source), then remaining custom repositories alphabetically, then `official` if not already listed. New projects prefer `official`; use `repo order` to put a custom repository ahead of it. The first source containing a package owns all candidate versions of that package: LPM does not mix versions from different publishers or fall through when its versions fail constraints. Only HTTP 404 for both index and manifest means a package is absent; network errors and invalid metadata stop resolution.
+
+Pin a package, including a transitive dependency, to one source:
+
+```text
+lpm repo use dns official
+lpm repo use special community
+lpm repo unuse special
+```
+
+Pins never fall through to another repository. `official` is a reserved alias and cannot be redirected; use a custom alias to track a fork or development branch. `lpm repo official disable` removes the official source from searches (clear any package pins to it first); `enable` restores it. Explicitly adding the same GitHub repository under another alias is independent of this switch.
+
+The original `lpm repo owner/repo [ref] [path]` command still sets the legacy `default` source. Existing project settings and lockfiles remain compatible. Repository edits require `lpm update` before restoring a previous lock.
 
 ## Commands
 
@@ -49,12 +86,36 @@ This reads `packages/<name>/manifest.lua`. Omit `packages` to use `<name>/manife
 | `lpm install --offline` | Restore a matching lock using verified installed files |
 | `lpm update` | Refresh all versions within declared constraints |
 | `lpm remove dns` | Remove a direct dependency, retaining it if needed transitively |
-| `lpm list` | Show installed versions and commit IDs |
+| `lpm list` | Show installed versions, commit IDs, and source repositories |
 | `lpm verify` | Check installed SHA-256 hashes |
 | `lpm setup` | Make the bare command available from any directory and after reboot |
-| `lpm repo owner/repo [ref] [path]` | Set the default GitHub repository |
+| `lpm self-update [ref]` | Update the invoked LPM script from the official repository |
+| `lpm repo owner/repo [ref] [path]` | Set the legacy default GitHub repository |
+| `lpm repo list` | Show effective search order and package pins |
+| `lpm repo add name owner/repo [ref] [path]` | Add or replace a named source |
+| `lpm repo remove name` | Remove an unused custom source |
+| `lpm repo default name` | Select a preferred source after explicit order entries |
+| `lpm repo order name ...` | Set repository search priority |
+| `lpm repo use package name` | Assign a package to one source |
+| `lpm repo unuse package` | Clear a package source assignment |
+| `lpm repo official enable\|disable` | Toggle the built-in source |
 
 Named installs and removals resolve the entire dependency set. Ordinary `install` honors the existing lock and rejects changes to `package.lua` until you run `update`. This avoids silently changing locked versions.
+
+## Progress and diagnostics
+
+Commands show labeled progress by default: repository searches, dependency resolution, an install/update/restore/remove plan, numbered file downloads, SHA-256 processing, transaction activation, and a final summary. The summary reports package/file counts, downloads, verified local reuse, removals, bytes staged, and elapsed time. Cached files do not appear as new downloads. A `Restore` plan entry means the version and source commit are unchanged; proxy file contents may still be fetched when resolving again.
+
+```text
+lpm install dns
+lpm --verbose update
+lpm install --offline --quiet
+lpm self-update -v
+```
+
+`--verbose` / `-v` adds HTTP requests and response sizes, optional metadata misses, pinned commits, candidate versions and backtracking, per-file hash checks, and cache reuse. `--quiet` / `-q` suppresses progress and completion messages while preserving warnings, errors, and requested data such as `list`, repository listings, help, and version output. Flags may appear before or after the command; quiet takes precedence if both are given.
+
+Failures use an `[ERROR][Failed]` message. Transaction recovery and rollback report their progress, and failed operations never emit a success summary. Self-updates show the selected source, version, validation, staging, and backup path. URL queries and credentials are redacted in diagnostic URLs. Logging failures cannot interrupt package activation or rollback. Output is written to the terminal; no log file is created automatically.
 
 ## Package manifest
 
@@ -77,6 +138,34 @@ return {
 
 Source paths are relative to the package's source directory. Destinations are relative to its installation directory. Explicit file lists avoid GitHub directory scraping. `modules` creates project-local loader files for require aliases; a library's installed `init.lua` also exports its package name. Other `.lua` paths get project-local loaders. Ordinary programs can use `require("dns")` without a special launcher or modified runtime. Installed applications get `<package-name>.lua` launch files, so run `dns-server --help` directly from the project directory. Loader files preserve the normal program environment and forward arguments. Module name conflicts and existing project files are rejected before activation.
 
+## Proxy packages and external file sources
+
+A repository can publish a manifest that downloads files directly from HTTPS URLs. This works in official and custom repositories; the manifest and dependency metadata stay in the selected GitHub repository. Relative file sources and HTTPS sources can be mixed:
+
+```lua
+return {
+    manifestVersion = 1,
+    name = "example",
+    version = "1.0.0",
+    type = "library",
+    files = {
+        ["https://example.com/releases/1.0.0/example.lua"] = "example.lua",
+        ["https://example.com/releases/1.0.0/helpers.lua"] = "helpers.lua",
+        ["local.lua"] = "local.lua",
+    },
+    modules = { example = "example.lua" },
+    dependencies = { dns = "^2.0.0" },
+    -- Optional publisher checksums use the exact source URL as the key:
+    -- hashes = {
+    --     ["https://example.com/releases/1.0.0/example.lua"] = "<64 hex SHA-256>",
+    -- },
+}
+```
+
+Each source URL must be unique; repeating a Lua table key is rejected. Use direct file download URLs, including query strings if necessary. Only HTTPS URLs without credentials or fragments are accepted; destinations must still be safe relative paths. Additional download hosts must be allowed by the Minecraft server's HTTP configuration. Downloads retain the 1 MiB per-file and 8 MiB installation limits.
+
+LPM records the downloaded bytes' SHA-256 hashes in the lockfile. Locked restores reject changed remote content; offline restores use verified installed files. The repository commit pins the manifest, but cannot freeze an external server's content: use immutable version URLs or optional publisher hashes for reproducible first installs and updates. `lpm update` resolves again and may accept new bytes if no publisher checksum is specified. Files are downloaded directly by the client; the official repository does not relay the bytes.
+
 ## Project package.lua
 
 ```lua
@@ -90,7 +179,10 @@ return {
         default = { github = "user/packages", ref = "main" },
         other = { github = "someone/libraries", ref = "main" },
     },
-    packageRepositories = { special = "other" },
+    defaultRepository = "default",
+    repositoryOrder = { "default", "other", "official" },
+    officialRepository = true, -- optional; enabled unless false
+    packageRepositories = { special = "other", dns = "official" },
     dependencies = { dns = "^2.0.0", special = "1.0.0" },
 }
 ```
