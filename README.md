@@ -4,6 +4,6 @@ A GitHub-backed package manager for CC:Tweaked, with multiple repositories, depe
 
 - [Install and use LPM](lpm/README.md)
 - [Standalone bundled script](lpm/lpm.lua)
-- [Official package registry](https://github.com/p4ncak3s-R0ck/LPM-Packages)
+- [Official packages, source files and tests](https://github.com/p4ncak3s-R0ck/LPM-Packages)
 
-`LPM-Packages` owns the official package definitions. Existing package implementation directories remain here as upstream source history; registry manifests pin the source commits and checksums. LPM self-updates come from this repository, independently of the registry.
+This repository contains only LPM. All DNS, RFS and updater package implementations, manifests, examples and tests live in LPM-Packages. LPM self-updates come from this repository, independently of the package repository.

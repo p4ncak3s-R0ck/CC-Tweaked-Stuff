@@ -51,6 +51,9 @@ local packages=0
 for n,x in pairs(locked.packages) do
     packages=packages+1
     assert(x.repository.github=='p4ncak3s-R0ck/LPM-Packages','Unexpected package source: '..n)
+    if n~='lpm' then
+        for src in pairs(x.manifest.files) do assert(not src:match('^https://'),'Package implementation still proxies to another repository: '..n) end
+    end
 end
 assert(packages==10,'Expected all 10 official packages')
 local verified=core.verify('project')

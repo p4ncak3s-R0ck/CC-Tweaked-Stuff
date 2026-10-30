@@ -42,7 +42,7 @@ Existing LPM builds without this command need a one-time download of the new bun
 
 Official repository definitions are maintained in [`official-repositories.lua`](official-repositories.lua). Edit that file and run `python lpm/tools/build.py` to update the bundled script. The generated `lpm.lua` includes the definitions, so clients do not need a second file.
 
-New projects use the built-in `official` repository: `p4ncak3s-R0ck/LPM-Packages` at `main`, with official package definitions at `<name>.lua`. Install official packages directly after `lpm init`:
+New projects use the built-in `official` repository: `p4ncak3s-R0ck/LPM-Packages` at `main`. Package source, manifests, examples and tests live there; folder packages use `<name>/manifest.lua`, and standalone packages use `<name>.lua`. Install official packages directly after `lpm init`:
 
 ```text
 lpm install dns
