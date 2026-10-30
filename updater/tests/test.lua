@@ -115,4 +115,37 @@ check('Path traversal and root directories are rejected',function()
     rejected(function() updater.new({path='../secret'},deps) end)
     rejected(function() updater.new({file='/meter.os.lua'},deps) end)
 end)
+check('New updater configurations use a ten-second interval',function()
+    normalRun('updater-project',{'init','42'},'update')
+    local config=U.load('/update-config.json')
+    assert(config.interval==10 and config.path=='meter.os.lua' and config.file=='meter.os.lua')
+end)
+check('Auto launcher starts Meter OS and forwards arguments',function()
+    local invoked,polls=false,0
+    put('auto-test.json',textutils.serializeJSON({dnsServer=42,reboot=false,background=false}))
+    local h=assert(io.open('update/main.lua','r')); local source=h:read('*a'); h:close()
+    local env=setmetatable({require=function(name)
+        if name=='updater' then return {new=function(c)
+            assert(c.reboot==true and c.background==true)
+            return {destination='/meter.os.lua',poll=function() polls=polls+1; return false end}
+        end} end
+        return hostRequire(name)
+    end,shell={run=function(path,arg) assert(path=='/meter.os.lua' and arg=='hello'); invoked=true; return true end},
+        parallel={waitForAny=function(run,watch) run() end}}, {__index=_G})
+    assert(load(source,'@update/main.lua','t',env))('auto','auto-test.json','hello')
+    assert(invoked and polls==1)
+end)
+check('Auto launcher waits ten seconds per check and reboots only for changed content',function()
+    local polls,waits,rebooted=0,0,false
+    local h=assert(io.open('update/main.lua','r')); local source=h:read('*a'); h:close()
+    local env=setmetatable({require=function(name)
+        if name=='updater' then return {new=function() return {destination='/meter.os.lua',poll=function() polls=polls+1; return polls==3 end} end} end
+        return hostRequire(name)
+    end, sleep=function(seconds) assert(seconds==10); waits=waits+1; assert(not rebooted) end,
+        os={reboot=function() rebooted=true; error('TEST_REBOOT') end},
+        parallel={waitForAny=function(run,watch) watch() end}}, {__index=_G})
+    local success,err=pcall(assert(load(source,'@update/main.lua','t',env)),'auto','auto-test.json')
+    assert(not success and tostring(err):find('TEST_REBOOT') and rebooted and polls==3 and waits==2)
+end)
+
 print('All updater checks passed ('..tests..' total checks including RFS)')

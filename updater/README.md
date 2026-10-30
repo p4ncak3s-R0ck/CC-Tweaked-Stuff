@@ -9,13 +9,13 @@ From the computer's root directory, with LPM already installed:
 ```text
 cd /
 lpm init
-lpm repo p4ncak3s-R0ck/CC-Tweaked-Stuff self-updating-rfs
+lpm repo p4ncak3s-R0ck/CC-Tweaked-Stuff main
 lpm install update
 update init 42 public
 update pull
 ```
 
-Replace **42** with your DNS computer's ID, and **public** with the RFS share containing `meter.os.lua`. The branch selection is needed until this change is merged; afterward select `main`. If this directory already has an LPM project, skip `lpm init`.
+Replace **42** with your DNS computer's ID, and **public** with the RFS share containing `meter.os.lua`. Until this change is merged, use the PR head commit as the repository ref instead of `main`. If this directory already has an LPM project, skip `lpm init`.
 
 This installs the `update` command and the `updater`, `dns`, and `rfs` libraries. Files are fetched over Rednet at runtime; GitHub/HTTP is only used for the initial LPM installation. Attach a modem and keep the DNS/RFS computers loaded.
 
@@ -28,15 +28,31 @@ The generated `/update-config.json`:
   "share": "public",
   "path": "meter.os.lua",
   "file": "meter.os.lua",
-  "interval": 300,
+  "interval": 10,
   "background": true,
   "reboot": false
 }
 ```
 
-`path` is relative to the RFS share. `file` is a filename installed at the client root; for example, `"path":"os/meter.os.lua"` still installs as `/meter.os.lua`. You can change both to update another single file. `interval` is 10–86400 seconds. Optional `modem` selects a DNS modem; otherwise attached modems are opened automatically.
+`path` is relative to the RFS share. `file` is a filename installed at the client root; for example, `"path":"os/meter.os.lua"` still installs as `/meter.os.lua`. You can change both to update another single file. `interval` defaults to 10 seconds and accepts 10–86400 seconds. Optional `modem` selects a DNS modem; otherwise attached modems are opened automatically.
 
 ## Automatic updates and startup
+
+For a launcher that checks before launch, polls while Meter OS runs, and reboots after installing changed code, use:
+
+```text
+update auto
+```
+
+Add this to your existing startup program, or `/startup/meter.lua` if `/startup` is a directory:
+
+```lua
+shell.run("/update.lua", "auto", "/update-config.json")
+```
+
+`auto` enables background polling and reboot after updates, respecting your configured `interval`. New configs and the fallback interval use **10 seconds**. For an existing config, set `"interval": 10` to use that cadence. It compares file contents by SHA-256, downloads only changed code, and requires only the server's `meter.os.lua`. No additional server metadata is needed. If the network is unavailable, it starts the existing local copy. An update installed before launch starts immediately; a background update reboots so startup runs the new code. Polling ends if Meter OS returns or fails.
+
+Use the existing `run` mode below when you want the config's `background` and `reboot` fields to control that behavior instead of the explicit `auto` defaults.
 
 Add this to your existing startup program, or save it as `/startup/meter.lua` if `/startup` is a directory:
 
@@ -44,7 +60,7 @@ Add this to your existing startup program, or save it as `/startup/meter.lua` if
 shell.run("/update.lua", "run", "/update-config.json")
 ```
 
-`run` checks for updates, then launches `/meter.os.lua`. If DNS or RFS is offline it launches the existing local copy. With `background=true`, it checks every five minutes while the program runs. A successful check replaces the file on disk; the running Lua program continues until its next launch. **Set `reboot=true` to reboot the computer automatically when a background update is installed.** Leave it false if interrupting the running program would be undesirable. `background=false` checks only before launch.
+`run` checks for updates, then launches `/meter.os.lua`. If DNS or RFS is offline it launches the existing local copy. With `background=true`, it checks every 10 seconds by default while the program runs. A successful check replaces the file on disk; the running Lua program continues until its next launch. **Set `reboot=true` to reboot the computer automatically when a background update is installed.** Leave it false if interrupting the running program would be undesirable. `background=false` checks only before launch.
 
 With no initial local copy, an unsuccessful first download stops startup with an error. Startup is never installed or overwritten automatically. The managed program runs with the shell's current working directory unchanged. If it returns or fails, `run` ends; rollback is a manual command.
 
@@ -57,6 +73,7 @@ update status
 update rollback
 update watch
 update run
+update auto
 ```
 
 All commands also accept a configuration filename: `update pull /other-config.json`. Arguments after that filename are passed to the program by `run`, e.g. `update run /update-config.json --display left`. `watch` only polls and updates; it does not launch the managed program.
@@ -80,14 +97,14 @@ For example, an RFS configuration can expose it with:
 }
 ```
 
-The DNS record already exists on your network. Its service values should use the RFS protocol string **`rednet-files-v1`**, and each target should have `ID` records for the actual RFS server computers. Example provisioning from an authenticated DNS admin client:
+The DNS record already exists on your network. Its service values should use the RFS protocol string **`rfs-v1`**, and each target should have `ID` records for the actual RFS server computers. Example provisioning from an authenticated DNS admin client:
 
 ```lua
 assert(dns.admin.setRecord("ID", "updates-primary.pancakes", 7, 60))
 assert(dns.admin.setRecord("ID", "updates-backup.pancakes", 12, 60))
 assert(dns.admin.setRecords("SRV", "update.server.pancakes", {
-    {value={target="updates-primary.pancakes", protocol="rednet-files-v1", priority=0, weight=100}, ttl=60},
-    {value={target="updates-backup.pancakes", protocol="rednet-files-v1", priority=10, weight=100}, ttl=60},
+    {value={target="updates-primary.pancakes", protocol="rfs-v1", priority=0, weight=100}, ttl=60},
+    {value={target="updates-backup.pancakes", protocol="rfs-v1", priority=10, weight=100}, ttl=60},
 }))
 ```
 
@@ -127,4 +144,4 @@ python -m pip install lupa
 python updater/tests/run.py
 ```
 
-The tests reuse the repository's simulated CC filesystem, actual RFS protocol implementation, and real LPM installer/module loaders. They cover package installation, public DNS, SRV ordering and ID zero, failover, root replacement, unchanged files, syntax rejection, offline failure, pinned hashes, rollback holds, failed activation, and restart recovery. Actual Minecraft modem/startup behavior still needs an in-game check.
+The tests reuse the repository's simulated CC filesystem, actual RFS protocol implementation, and real LPM installer/module loaders. They cover package installation, public DNS, SRV ordering and ID zero, failover, root replacement, unchanged files, syntax rejection, offline failure, pinned hashes, rollback holds, failed activation, and restart recovery. The launcher tests also cover argument forwarding, 10-second polling, reboot after changed content, and no reboot when the file is unchanged. Actual Minecraft modem/startup behavior still needs an in-game check.

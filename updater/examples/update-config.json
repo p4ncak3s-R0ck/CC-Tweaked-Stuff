@@ -4,7 +4,7 @@
   "share": "public",
   "path": "meter.os.lua",
   "file": "meter.os.lua",
-  "interval": 300,
+  "interval": 10,
   "background": true,
   "reboot": false
 }

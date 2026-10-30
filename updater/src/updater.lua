@@ -2,7 +2,7 @@
 local rfs=require('rfs')
 local U=require('rfs_common')
 local C=U.crypto
-local M={version='0.1.0',service='update.server.pancakes'}
+local M={version='0.1.1',service='update.server.pancakes'}
 local function need(v,e) assert(v,e); return v end
 local function validHash(h) return type(h)=='string' and #h==64 and h:match('^[0-9a-f]+$') end
 local function message(e) return type(e)=='table' and (e.message or e.code) or tostring(e) end
