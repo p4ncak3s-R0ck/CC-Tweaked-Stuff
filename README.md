@@ -2,6 +2,12 @@
 
 A GitHub-backed package manager for CC:Tweaked. [Bundled script](lpm.lua) · [Official packages](https://github.com/p4ncak3s-R0ck/LPM-Packages). The bundled `lpm.lua` has no external Lua dependencies. DNS and message brokers are not required.
 
+## Install across a Minecraft server
+
+Use the [server datapack](datapack/README.md) to provide LPM automatically on every CC:Tweaked computer. Download the ZIP for your game version from the [nightly release](https://github.com/p4ncak3s-R0ck/LPM/releases/tag/nightly), place it in `<world>/datapacks/`, enable/reload it and reboot existing computers. Minecraft 1.21 through 1.21.11 have separate builds, including 1.21.1 and 1.21.11.
+
+The boot installer copies LPM to writable `/bin/lpm.lua` without HTTP, preserves existing installs and startup programs, and supports `lpm self-update`. GitHub Actions refreshes the `nightly` prerelease after each `main` push or a manual run on `main`.
+
 ## Install on a computer
 
 Download the bundled script as `lpm`, then run `lpm setup` once. This copies it to `/bin/lpm.lua`, adds `/bin` to the current shell path, and creates `/startup/lpm-path.lua` so the bare `lpm` command is available after reboot. If `/startup` is an existing file, setup preserves it and asks you to add `/bin` to your shell path manually. CC:Tweaked 1.88+ is required for `cc.require`; HTTP must be enabled for online installation. Public GitHub repositories only. Both `raw.githubusercontent.com` and `api.github.com` must be permitted by your server's HTTP rules.

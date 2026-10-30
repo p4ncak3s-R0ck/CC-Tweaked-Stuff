@@ -1,0 +1,73 @@
+name: Nightly datapacks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not cancel publication midway through replacing nightly's assets.
+concurrency:
+  group: lpm-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install Lua test runtime
+        run: python -m pip install --disable-pip-version-check lupa==2.8
+      - name: Build and verify the bundled script
+        run: |
+          python tools/build.py
+          git diff --exit-code -- lpm.lua
+          python tests/run.py
+          python tests/datapack_bootstrap.py
+          python -m unittest discover -s tests -p 'test_datapacks.py' -v
+      - name: Build every supported Minecraft datapack
+        run: |
+          python tools/build_datapacks.py --commit "$GITHUB_SHA"
+          python tools/publish_nightly.py --dry-run
+      - name: Save build outputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lpm-datapacks
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      # Rebuilding is deterministic and avoids granting artifact-download permissions.
+      - name: Build release files
+        run: |
+          python tools/build.py
+          python tools/build_datapacks.py --commit "$GITHUB_SHA"
+      - name: Publish the nightly prerelease and update its tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python tools/publish_nightly.py
